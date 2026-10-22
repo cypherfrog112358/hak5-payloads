@@ -1,4 +1,4 @@
-REM     Title: Screenshare-Over-LAN
+﻿REM     Title: Screenshare-Over-LAN
 
 REM     Author: cypherfrog112358
 
@@ -12,11 +12,11 @@ REM     Target: Windows 10/11
 REM     Payload: https://raw.githubusercontent.com/cypherfrog112358/hak5-payloads/v1.1/s.ps1
 REM     (s.ps1 = identische Kurz-Datei von Screenshare-Over-LAN-fixed.ps1,
 REM      spart 23 Zeichen im 259-Zeichen-Limit)
-REM     Der Tag 'v1.1' ist ABSCHLIESSEND (immutable): der Inhalt dahinter
+REM     Der Tag 'v1.2' ist ABSCHLIESSEND (immutable): der Inhalt dahinter
 REM     kann sich nicht mehr aendern. Das ist wichtig, weil GitHub die
 REM     Raw-Dateien von beweglichen Refs ('main', 'HEAD') zum Teil minutenlang
 REM     aus dem CDN-Cache ausliefert - man laege dann eine alte Version.
-REM     Bei einer neuen Version bekommt das ps1 einen neuen Tag (z. B. v1.2)
+REM     Bei einer neuen Version bekommt das ps1 einen neuen Tag (z. B. v1.3)
 REM     und die URL in diesem Script wird angepasst.
 
 REM     WICHTIG - 259-Zeichen-Limit:
