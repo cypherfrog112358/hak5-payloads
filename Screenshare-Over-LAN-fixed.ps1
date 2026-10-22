@@ -119,10 +119,22 @@ if ($autostart -eq 1 -and $selfPath) {
             $cmdLine = '"' + $psExe + '" -w h -ExecutionPolicy Bypass -File "' + $selfPath + '"'
             $rk = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Microsoft\Windows\CurrentVersion\Run', $true)
             if ($rk) {
-                $rk.SetValue('Screenshare-Over-LAN', $cmdLine, [Microsoft.Win32.RegistryValueKind]::String)
-                $rk.Close()
-                Write-Host "Autostart eingerichtet: Registry HKCU\...\Run\Screenshare-Over-LAN" -ForegroundColor Green
-                Write-Log ("Autostart: Registry-Eintrag gesetzt (HKCU\...\Run\Screenshare-Over-LAN) -> " + $cmdLine)
+                # Doppelstart vermeiden: existiert der Task bereits, wird der
+                # Registry-Eintrag NICHT gesetzt (sonst startet die ps1 zweimal).
+                $taskExists = $false
+                try {
+                    $q = schtasks /query /tn $taskName 2>&1
+                    if ($LASTEXITCODE -eq 0) { $taskExists = $true }
+                } catch { }
+                if ($taskExists) {
+                    Write-Host "Autostart: Task existiert bereits - kein Registry-Eintrag gesetzt (kein Doppelstart)." -ForegroundColor Green
+                    Write-Log "Autostart: Task existiert bereits - Registry-Eintrag bewusst nicht gesetzt (verhindert Doppelstart)"
+                } else {
+                    $rk.SetValue('Screenshare-Over-LAN', $cmdLine, [Microsoft.Win32.RegistryValueKind]::String)
+                    $rk.Close()
+                    Write-Host "Autostart eingerichtet: Registry HKCU\...\Run\Screenshare-Over-LAN" -ForegroundColor Green
+                    Write-Log ("Autostart: Registry-Eintrag gesetzt (HKCU\...\Run\Screenshare-Over-LAN) -> " + $cmdLine)
+                }
             } else {
                 Write-Host "Autostart FEHLGESCHLAGEN: Registry-Eintrag nicht schreibbar." -ForegroundColor Red
                 Write-Log "Autostart: FEHLGESCHLAGEN - Registry-Eintrag nicht schreibbar"
@@ -137,6 +149,25 @@ if ($autostart -eq 1 -and $selfPath) {
 if (-not $isAdmin) {
     Write-Host "WARNUNG: Keine Administratorrechte - Firewall-Regel, URL-Reservierung und Defender-Ausnahme werden nicht angelegt." -ForegroundColor Red
 }
+
+# --- Vorherige Instanzen beenden --------------------------------------------
+# Beim mehrfachen Start (z. B. DuckyScript mehrfach ausgefuehrt) bleiben
+# sonst mehrere Server auf Port 8080 liegen: jeder haelt einen Kern busy
+# (Dauer-Encoding) und liefert dem Client ein halb wahres Bild. Diese
+# Instanz raeumt die alten Prozesse ab - das setzt Adminrechte voraus.
+try {
+    if ($selfPath) {
+        $me = $pid
+        $old = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction Stop |
+               Where-Object { $_.ProcessId -ne $me -and $_.CommandLine -and $_.CommandLine -like ('*' + $selfPath + '*') }
+        foreach ($o in $old) {
+            Write-Host ("Beende vorherige Instanz (PID " + $o.ProcessId + ")") -ForegroundColor Yellow
+            Write-Log ("Beende vorherige Instanz PID " + $o.ProcessId)
+            Stop-Process -Id $o.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+        if ($old) { Start-Sleep -Milliseconds 800 }
+    }
+} catch { }
 
 # ------------------------------------------------- DPI: Voraussetzung fuer Capture
 # Hintergrund: PowerShell ist per Default nicht DPI-aware. Auf skalierten
@@ -321,21 +352,37 @@ try {
 } catch { }
 
 # --- HttpListener ----------------------------------------------------------
-$webServer = New-Object System.Net.HttpListener
-if ($localIP) {
-    $webServer.Prefixes.Add("http://${localIP}:${port}/")
-    $webServer.Prefixes.Add("http://localhost:${port}/")
-} else {
-    # Kein spezifischer Host -> alle Interfaces
-    $webServer.Prefixes.Add("http://+:${port}/")
+# Start mit mehreren Versuchen: der Port ist evtl. noch nicht von einer
+# gerade beendeten Instanz freigegeben. Pro Versuch ein neuer Listener,
+# weil ein fehlgeschlagener Start sich nicht wieder aufsetzen laesst.
+$started = $false
+$webServer = $null
+for ($attempt = 1; $attempt -le 5 -and -not $started; $attempt++) {
+    try {
+        $webServer = New-Object System.Net.HttpListener
+        if ($localIP) {
+            $webServer.Prefixes.Add("http://${localIP}:${port}/")
+            $webServer.Prefixes.Add("http://localhost:${port}/")
+        } else {
+            # Kein spezifischer Host -> alle Interfaces
+            $webServer.Prefixes.Add("http://+:${port}/")
+        }
+        $webServer.Start()
+        $started = $webServer.IsListening
+    } catch {
+        Write-Log ("Start-Versuch " + $attempt + " fehlgeschlagen: " + $_.Exception.Message)
+        try { $webServer.Stop() } catch { }
+        $webServer = $null
+        if ($attempt -lt 5) { Start-Sleep -Seconds 1 }
+    }
 }
-try {
-    $webServer.Start()
-} catch {
-    Write-Host ("FEHLER: Der HTTP-Server liess sich nicht starten: " + $_.Exception.Message) -ForegroundColor Red
+if (-not $started) {
+    Write-Host "FEHLER: Der HTTP-Server liess sich nicht starten." -ForegroundColor Red
     Write-Host "Haeufigste Ursache: keine Administratorrechte - dann fehlt die" -ForegroundColor Red
     Write-Host "URL-Reservierung (http://+:PORT/ user=Everyone) fuer HTTP.sys." -ForegroundColor Red
+    Write-Host "Oder: eine andere Instanz laeuft noch und belegt den Port." -ForegroundColor Red
     Write-Host "Gegenprobe: netsh http show urlacl | findstr :$port" -ForegroundColor DarkGray
+    Write-Log "FEHLER: HTTP-Server nicht startbar"
     exit 1
 }
 if (-not $webServer.IsListening) {
@@ -410,108 +457,161 @@ $encParams.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter ([Syste
 $frameInterval = [int](1000 / $fps)
 if ($frameInterval -lt 20) { $frameInterval = 20 }
 
+# --- Stream-Worker als eigener Runspace --------------------------------------
+# Vorher lief der Stream in der Hauptschleife: solange ein Client zuschaut,
+# konnte der Server KEINE weitere Anfrage beantworten - ein Reload der Seite
+# blieb dann ohne Antwort (weisse Seite). Jetzt laeuft jeder Stream in einem
+# eigenen Runspace, der Hauptserver bedient weiter die Seite und weitere
+# Clients.
+$streamWorker = {
+    param($ctx, $jpegCodecInfo, $encParamsObj, $capW, $capH, $dpi, $maxW, $interval, $rect)
+    $resp = $ctx.Response
+    $resp.ContentType = "multipart/x-mixed-replace; boundary=frame"
+    $resp.Headers.Add("Cache-Control", "no-cache, no-store, must-revalidate")
+    $resp.Headers.Add("Pragma", "no-cache")
+    $boundary = "--frame"
+    try {
+        while ($resp.OutputStream.CanWrite) {
+            # --- Bildschirm aufnehmen (DPI-korrekt) -----------------------
+            # $capW/$capH sind bereits die PHYSISCHEN Pixel
+            # (logische Bounds x Skalierungsfaktor).
+            $bitmap = New-Object System.Drawing.Bitmap $capW, $capH
+            $bitmap.SetResolution($dpi, $dpi)
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            $graphics.CopyFromScreen($rect.X, $rect.Y, 0, 0, (New-Object System.Drawing.Size($capW, $capH)))
+            $graphics.Dispose()
+
+            # --- optional auf max. Breite verkleinern ---------------------
+            if ($maxW -gt 0 -and $capW -gt $maxW) {
+                $newHeight = [int][Math]::Round($capH * ($maxW / $capW))
+                $small = New-Object System.Drawing.Bitmap $maxW, $newHeight
+                $small.SetResolution($dpi, $dpi)
+                $g2 = [System.Drawing.Graphics]::FromImage($small)
+                $g2.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+                $g2.DrawImage($bitmap, 0, 0, $maxW, $newHeight)
+                $g2.Dispose()
+                $bitmap.Dispose()
+                $bitmap = $small
+            }
+
+            # --- JPEG kodieren --------------------------------------------
+            $ms = New-Object System.IO.MemoryStream
+            if ($jpegCodecInfo) {
+                $bitmap.Save($ms, $jpegCodecInfo, $encParamsObj)
+            } else {
+                $bitmap.Save($ms, [System.Drawing.Imaging.ImageFormat]::Jpeg)
+            }
+            $bitmap.Dispose()
+            $bytes = $ms.ToArray()
+            $ms.Dispose()
+
+            $writer = [System.Text.Encoding]::ASCII.GetBytes("$boundary`r`nContent-Type: image/jpeg`r`nContent-Length: $($bytes.Length)`r`n`r`n")
+            $resp.OutputStream.Write($writer, 0, $writer.Length)
+            $resp.OutputStream.Write($bytes, 0, $bytes.Length)
+            $bw = [System.Text.Encoding]::ASCII.GetBytes("`r`n")
+            $resp.OutputStream.Write($bw, 0, $bw.Length)
+            $resp.OutputStream.Flush()
+
+            Start-Sleep -Milliseconds $interval
+        }
+    } catch {
+        try { $resp.Abort() } catch { }
+    }
+}
+
 while ($true) {
     try {
-        $context = $webServer.GetContext()
+        # GetContextAsync: haelt die Schleife responsiv (ESC-Pruefung) und
+        # erlaubt parallele Verbindungen.
+        $ctxTask = $webServer.GetContextAsync()
+        while (-not $ctxTask.Wait(250)) {
+            # ESC zum Beenden (5 s halten)
+            if ([Keyboard]::GetAsyncKeyState($VK_ESCAPE) -lt 0) {
+                if (-not $startTime) { $startTime = Get-Date }
+                if (((Get-Date) - $startTime).TotalSeconds -ge $exitSeconds) {
+                    try { $notify.Visible = $false; $notify.Dispose() } catch { }
+                    (New-Object -ComObject Wscript.Shell).Popup("Screenshare Closed.",3,"Information",0x0)
+                    Start-Sleep -Seconds 1
+                    exit
+                }
+            } else {
+                $startTime = $null
+            }
+        }
+        $context = $ctxTask.Result
         $response = $context.Response
-        if ($context.Request.RawUrl -eq "/stream") {
-            $response.ContentType = "multipart/x-mixed-replace; boundary=frame"
-            $response.Headers.Add("Cache-Control", "no-cache")
-            $boundary = "--frame"
-
-            while ($context.Response.OutputStream.CanWrite) {
-                # --- Bildschirm aufnehmen (DPI-korrekt) ---------------------
-                # $captureW/$captureH sind bereits die PHYSISCHEN Pixel
-                # (logische Bounds x Skalierungsfaktor).
-                $bitmap = New-Object System.Drawing.Bitmap $captureW, $captureH
-                $bitmap.SetResolution($screenDpi, $screenDpi)
-                $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-                $graphics.CopyFromScreen($srcRect.X, $srcRect.Y, 0, 0, (New-Object System.Drawing.Size($captureW, $captureH)))
-                $graphics.Dispose()
-
-                # --- optional auf max. Breite verkleinern -------------------
-                if ($maxWidth -gt 0 -and $captureW -gt $maxWidth) {
-                    $newHeight = [int][Math]::Round($captureH * ($maxWidth / $captureW))
-                    $small = New-Object System.Drawing.Bitmap $maxWidth, $newHeight
-                    $small.SetResolution($screenDpi, $screenDpi)
-                    $g2 = [System.Drawing.Graphics]::FromImage($small)
-                    $g2.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-                    $g2.DrawImage($bitmap, 0, 0, $maxWidth, $newHeight)
-                    $g2.Dispose()
-                    $bitmap.Dispose()
-                    $bitmap = $small
-                }
-
-                # --- JPEG kodieren ------------------------------------------
-                $stream = New-Object System.IO.MemoryStream
-                if ($jpegCodec) {
-                    $bitmap.Save($stream, $jpegCodec, $encParams)
-                } else {
-                    $bitmap.Save($stream, [System.Drawing.Imaging.ImageFormat]::Jpeg)
-                }
-                $bitmap.Dispose()
-                $bytes = $stream.ToArray()
-                $stream.Dispose()
-
-                $writer = [System.Text.Encoding]::ASCII.GetBytes("$boundary`r`nContent-Type: image/jpeg`r`nContent-Length: $($bytes.Length)`r`n`r`n")
-                $response.OutputStream.Write($writer, 0, $writer.Length)
-                $response.OutputStream.Write($bytes, 0, $bytes.Length)
-                $boundaryWriter = [System.Text.Encoding]::ASCII.GetBytes("`r`n")
-                $response.OutputStream.Write($boundaryWriter, 0, $boundaryWriter.Length)
-                $response.OutputStream.Flush()
-
-                Start-Sleep -Milliseconds $frameInterval
-
-                # Check for the escape key press to exit
-                $isEscapePressed = [Keyboard]::GetAsyncKeyState($VK_ESCAPE) -lt 0
-                if ($isEscapePressed) {
-                    if (-not $startTime) {
-                        $startTime = Get-Date
-                    }
-                    $elapsedTime = (Get-Date) - $startTime
-                    if ($elapsedTime.TotalSeconds -ge $exitSeconds) {
-                        try { $notify.Visible = $false; $notify.Dispose() } catch { }
-                        (New-Object -ComObject Wscript.Shell).Popup("Screenshare Closed.",3,"Information",0x0)
-                        Start-Sleep -Seconds 1
-                        exit
-                    }
-                } else {
-                    $startTime = $null
-                }
+        $rawUrl = $context.Request.RawUrl
+        if ($rawUrl -like "/stream*") {
+            # Stream in eigenem Runspace -> Hauptserver bleibt frei
+            try {
+                $rs = [runspacefactory]::CreateRunspace()
+                $rs.Open()
+                $ps = [powershell]::Create()
+                $ps.Runspace = $rs
+                [void]$ps.AddScript($streamWorker)
+                [void]$ps.AddArgument($context)
+                [void]$ps.AddArgument($jpegCodec)
+                [void]$ps.AddArgument($encParams)
+                [void]$ps.AddArgument($captureW)
+                [void]$ps.AddArgument($captureH)
+                [void]$ps.AddArgument($screenDpi)
+                [void]$ps.AddArgument($maxWidth)
+                [void]$ps.AddArgument($frameInterval)
+                [void]$ps.AddArgument($srcRect)
+                [void]$ps.BeginInvoke()
+            } catch {
+                Write-Log ("Stream-Worker nicht startbar: " + $_.Exception.Message)
+                $response.Abort()
             }
         } else {
-            $response.ContentType = "text/html"
+            # HTML-Seite: fuer jeden Pfad (ausser /stream), damit z. B. ein
+            # Favicon-Request oder ein Tippfehler nicht die Seite blockiert.
+            $response.ContentType = "text/html; charset=utf-8"
+            $response.Headers.Add("Cache-Control", "no-cache, no-store, must-revalidate")
+            $response.Headers.Add("Pragma", "no-cache")
+            $response.Headers.Add("Expires", "0")
+            $stamp = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
             $html = @"
 <!DOCTYPE html>
 <html>
 <head>
+    <meta charset="utf-8">
     <title>Streaming Video</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
 <style>
     html, body {
         margin: 0;
         padding: 0;
         background-color: #000;
+        width: 100%;
         height: 100%;
         overflow: hidden;
     }
     img {
         display: block;
+        position: fixed;
+        top: 0;
+        left: 0;
         width: 100vw;
         height: 100vh;
+        max-width: 100vw;
+        max-height: 100vh;
         object-fit: contain;
+        object-position: center center;
+        background-color: #000;
     }
 </style>
 </head>
 <body>
-    <img src='/stream' alt='Streaming Video' />
+    <img src="/stream?t=$stamp" alt="Streaming Video" />
 </body>
 </html>
 "@
             $buffer = [System.Text.Encoding]::UTF8.GetBytes($html)
+            $response.ContentLength64 = $buffer.Length
             $response.OutputStream.Write($buffer, 0, $buffer.Length)
+            $response.Close()
         }
-        $response.Close()
     } catch {
         Write-Host "Error encountered: $_"
         Write-Log ("Fehler: " + $_.Exception.Message)
