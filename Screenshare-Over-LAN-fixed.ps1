@@ -519,16 +519,16 @@ $streamWorker = {
             # --- Bildschirm aufnehmen (DPI-korrekt) -----------------------
             # $capW/$capH sind bereits die PHYSISCHEN Pixel
             # (logische Bounds x Skalierungsfaktor).
-            $bitmap = New-Object System.Drawing.Bitmap $capW, $capH
+            $bitmap = [System.Drawing.Bitmap]::new($capW, $capH)
             $bitmap.SetResolution($dpi, $dpi)
-            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-            $graphics.CopyFromScreen($rect.X, $rect.Y, 0, 0, (New-Object System.Drawing.Size($capW, $capH)))
-            $graphics.Dispose()
+            $gfx = [System.Drawing.Graphics]::FromImage($bitmap)
+            $gfx.CopyFromScreen($rect.X, $rect.Y, 0, 0, (New-Object System.Drawing.Size($capW, $capH)))
+            $gfx.Dispose()
 
             # --- optional auf max. Breite verkleinern ---------------------
             if ($maxW -gt 0 -and $capW -gt $maxW) {
                 $newHeight = [int][Math]::Round($capH * ($maxW / $capW))
-                $small = New-Object System.Drawing.Bitmap $maxW, $newHeight
+                $small = [System.Drawing.Bitmap]::new($maxW, $newHeight)
                 $small.SetResolution($dpi, $dpi)
                 $g2 = [System.Drawing.Graphics]::FromImage($small)
                 $g2.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
