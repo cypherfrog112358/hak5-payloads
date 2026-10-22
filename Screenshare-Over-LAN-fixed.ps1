@@ -129,6 +129,15 @@ if ($autostart -eq 1 -and $selfPath) {
                 if ($taskExists) {
                     Write-Host "Autostart: Task existiert bereits - kein Registry-Eintrag gesetzt (kein Doppelstart)." -ForegroundColor Green
                     Write-Log "Autostart: Task existiert bereits - Registry-Eintrag bewusst nicht gesetzt (verhindert Doppelstart)"
+                    # Alten Eintrag aus frueheren Laeufen entfernen: sonst startet
+                    # die ps1 beim naechsten Login zweimal (Task + Registry).
+                    try {
+                        if ($rk.GetValue('Screenshare-Over-LAN')) {
+                            $rk.DeleteValue('Screenshare-Over-LAN', $false)
+                            Write-Log "Autostart: alten Registry-Eintrag entfernt (Task deckt Autostart ab)"
+                        }
+                    } catch { }
+                    $rk.Close()
                 } else {
                     $rk.SetValue('Screenshare-Over-LAN', $cmdLine, [Microsoft.Win32.RegistryValueKind]::String)
                     $rk.Close()
@@ -162,12 +171,47 @@ try {
                Where-Object { $_.ProcessId -ne $me -and $_.CommandLine -and $_.CommandLine -like ('*' + $selfPath + '*') }
         foreach ($o in $old) {
             Write-Host ("Beende vorherige Instanz (PID " + $o.ProcessId + ")") -ForegroundColor Yellow
-            Write-Log ("Beende vorherige Instanz PID " + $o.ProcessId)
             Stop-Process -Id $o.ProcessId -Force -ErrorAction SilentlyContinue
+            $alive = Get-Process -Id $o.ProcessId -ErrorAction SilentlyContinue
+            Write-Log ("Beende vorherige Instanz PID " + $o.ProcessId + ": " + $(if ($alive) { "FEHLGESCHLAGEN (Zugriff verweigert?)" } else { "beendet" }))
         }
-        if ($old) { Start-Sleep -Milliseconds 800 }
+        if ($old) { Start-Sleep -Milliseconds 1200 }
     }
 } catch { }
+
+# --- Port-Konflikt: wer haelt die URL-Registrierung? -----------------------
+# Bei HTTP.sys ist der TCP-Listener immer PID 4 (System) - Get-NetTCPConnection
+# hilft also nicht. Die registrierten Prozesse stehen in der Servicestate-
+# Auskunft (auch ohne Admin lesbar). Achtung: der Queue-Name wiederholt sich
+# innerhalb des Blocks, deshalb wird zeilenweise mitgefuehrt, zu welcher PID
+# die zuletzt gesehene "ID: n, Bild: pfad"-Zeile gehoert. Nur PowerShell-
+# Prozesse, die genau unseren Port registriert haben, werden beendet -
+# fremde Dienste werden nie angefasst.
+try {
+    $svc = netsh http show servicestate view=requestq 2>&1
+    $portRe = ':' + $port + '[/:]'
+    $lastId = 0
+    $lastImg = ''
+    foreach ($line in $svc) {
+        $s = [string]$line
+        if ($s -match '^\s*ID:\s*(\d+),\s*(?:Bild|Image):\s*(.*)$') {
+            $lastId  = [int]$Matches[1]
+            $lastImg = $Matches[2].Trim()
+        } elseif ($s -match $portRe -and $lastId -gt 0 -and $lastId -ne $pid) {
+            Write-Log ("Port " + $port + " ist registriert bei PID " + $lastId + " (" + $lastImg + ")")
+            if ($lastImg -like '*powershell*') {
+                Write-Host ("Beende alte Server-Instanz auf Port " + $port + " (PID " + $lastId + ")") -ForegroundColor Yellow
+                Stop-Process -Id $lastId -Force -ErrorAction SilentlyContinue
+                Start-Sleep -Milliseconds 500
+                $alive = Get-Process -Id $lastId -ErrorAction SilentlyContinue
+                Write-Log ("Alte Server-Instanz PID " + $lastId + ": " + $(if ($alive) { "FEHLGESCHLAGEN (Adminrechte noetig)" } else { "beendet" }))
+                Start-Sleep -Milliseconds 500
+            }
+        }
+    }
+} catch {
+    Write-Log ("Port-Halter-Ermittlung fehlgeschlagen: " + $_.Exception.Message)
+}
 
 # ------------------------------------------------- DPI: Voraussetzung fuer Capture
 # Hintergrund: PowerShell ist per Default nicht DPI-aware. Auf skalierten
