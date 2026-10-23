@@ -48,6 +48,7 @@ $exitSeconds  = 5     # ESC-Dauer zum Beenden
 $autostart    = 1     # 1 = Task im Task-Planer anlegen (startet bei jedem Login)
 $taskName     = 'Screenshare-Over-LAN'
 $captureAll   = 0     # 0 = nur primaerer Bildschirm, 1 = alle Monitore (VirtualScreen)
+$showInfo     = 1     # 1 = sichtbares CMD-Fenster mit der Aufruf-URL oeffnen
 $logFile      = $null # z. B. 'C:\PS\screenshare.log' - null = Log neben der ps1
 
 $selfPath = $MyInvocation.MyCommand.Path
@@ -129,6 +130,15 @@ if ($autostart -eq 1 -and $selfPath) {
                 if ($taskExists) {
                     Write-Host "Autostart: Task existiert bereits - kein Registry-Eintrag gesetzt (kein Doppelstart)." -ForegroundColor Green
                     Write-Log "Autostart: Task existiert bereits - Registry-Eintrag bewusst nicht gesetzt (verhindert Doppelstart)"
+                    # Alten Eintrag aus frueheren Laeufen entfernen: sonst startet
+                    # die ps1 beim naechsten Login zweimal (Task + Registry).
+                    try {
+                        if ($rk.GetValue('Screenshare-Over-LAN')) {
+                            $rk.DeleteValue('Screenshare-Over-LAN', $false)
+                            Write-Log "Autostart: alten Registry-Eintrag entfernt (Task deckt Autostart ab)"
+                        }
+                    } catch { }
+                    $rk.Close()
                 } else {
                     $rk.SetValue('Screenshare-Over-LAN', $cmdLine, [Microsoft.Win32.RegistryValueKind]::String)
                     $rk.Close()
@@ -162,12 +172,47 @@ try {
                Where-Object { $_.ProcessId -ne $me -and $_.CommandLine -and $_.CommandLine -like ('*' + $selfPath + '*') }
         foreach ($o in $old) {
             Write-Host ("Beende vorherige Instanz (PID " + $o.ProcessId + ")") -ForegroundColor Yellow
-            Write-Log ("Beende vorherige Instanz PID " + $o.ProcessId)
             Stop-Process -Id $o.ProcessId -Force -ErrorAction SilentlyContinue
+            $alive = Get-Process -Id $o.ProcessId -ErrorAction SilentlyContinue
+            Write-Log ("Beende vorherige Instanz PID " + $o.ProcessId + ": " + $(if ($alive) { "FEHLGESCHLAGEN (Zugriff verweigert?)" } else { "beendet" }))
         }
-        if ($old) { Start-Sleep -Milliseconds 800 }
+        if ($old) { Start-Sleep -Milliseconds 1200 }
     }
 } catch { }
+
+# --- Port-Konflikt: wer haelt die URL-Registrierung? -----------------------
+# Bei HTTP.sys ist der TCP-Listener immer PID 4 (System) - Get-NetTCPConnection
+# hilft also nicht. Die registrierten Prozesse stehen in der Servicestate-
+# Auskunft (auch ohne Admin lesbar). Achtung: der Queue-Name wiederholt sich
+# innerhalb des Blocks, deshalb wird zeilenweise mitgefuehrt, zu welcher PID
+# die zuletzt gesehene "ID: n, Bild: pfad"-Zeile gehoert. Nur PowerShell-
+# Prozesse, die genau unseren Port registriert haben, werden beendet -
+# fremde Dienste werden nie angefasst.
+try {
+    $svc = netsh http show servicestate view=requestq 2>&1
+    $portRe = ':' + $port + '[/:]'
+    $lastId = 0
+    $lastImg = ''
+    foreach ($line in $svc) {
+        $s = [string]$line
+        if ($s -match '^\s*ID:\s*(\d+),\s*(?:Bild|Image):\s*(.*)$') {
+            $lastId  = [int]$Matches[1]
+            $lastImg = $Matches[2].Trim()
+        } elseif ($s -match $portRe -and $lastId -gt 0 -and $lastId -ne $pid) {
+            Write-Log ("Port " + $port + " ist registriert bei PID " + $lastId + " (" + $lastImg + ")")
+            if ($lastImg -like '*powershell*') {
+                Write-Host ("Beende alte Server-Instanz auf Port " + $port + " (PID " + $lastId + ")") -ForegroundColor Yellow
+                Stop-Process -Id $lastId -Force -ErrorAction SilentlyContinue
+                Start-Sleep -Milliseconds 500
+                $alive = Get-Process -Id $lastId -ErrorAction SilentlyContinue
+                Write-Log ("Alte Server-Instanz PID " + $lastId + ": " + $(if ($alive) { "FEHLGESCHLAGEN (Adminrechte noetig)" } else { "beendet" }))
+                Start-Sleep -Milliseconds 500
+            }
+        }
+    }
+} catch {
+    Write-Log ("Port-Halter-Ermittlung fehlgeschlagen: " + $_.Exception.Message)
+}
 
 # ------------------------------------------------- DPI: Voraussetzung fuer Capture
 # Hintergrund: PowerShell ist per Default nicht DPI-aware. Auf skalierten
@@ -400,6 +445,21 @@ if ($localIP) {
 Write-Host "Press escape key for 5 seconds to exit" -f Cyan
 Write-Log ("Server laeuft auf " + $urlText)
 
+# --- Sichtbares Info-Fenster: CMD mit der Aufruf-URL -----------------------
+# Das ps1 selbst startet versteckt (-w h), damit waere die Adresse nirgends
+# ablesbar. Deshalb hier bewusst ein eigenes, sichtbares CMD-Fenster (bleibt
+# per /k offen, laesst sich schliessen). Nur ASCII, sonst Zeichensalat.
+if ($showInfo -eq 1) {
+    try {
+        $infoCmd = 'title Screenshare & echo. & echo   Im Browser aufrufen: ' + $urlText +
+                   ' & echo. & echo   (Client im selben LAN) & echo. & echo   Beenden: ESC auf dem Ziel 5 Sekunden halten. & echo.'
+        Start-Process -FilePath 'cmd.exe' -ArgumentList '/k', $infoCmd | Out-Null
+        Write-Log "Info-Fenster (cmd) mit Aufruf-URL geoeffnet"
+    } catch {
+        Write-Log ("Info-Fenster fehlgeschlagen: " + $_.Exception.Message)
+    }
+}
+
 # --- Hinweis per Tray-Balloon (das Fenster ist versteckt) --------------------
 try {
     $notify = New-Object System.Windows.Forms.NotifyIcon
@@ -475,16 +535,16 @@ $streamWorker = {
             # --- Bildschirm aufnehmen (DPI-korrekt) -----------------------
             # $capW/$capH sind bereits die PHYSISCHEN Pixel
             # (logische Bounds x Skalierungsfaktor).
-            $bitmap = New-Object System.Drawing.Bitmap $capW, $capH
+            $bitmap = [System.Drawing.Bitmap]::new($capW, $capH)
             $bitmap.SetResolution($dpi, $dpi)
-            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-            $graphics.CopyFromScreen($rect.X, $rect.Y, 0, 0, (New-Object System.Drawing.Size($capW, $capH)))
-            $graphics.Dispose()
+            $gfx = [System.Drawing.Graphics]::FromImage($bitmap)
+            $gfx.CopyFromScreen($rect.X, $rect.Y, 0, 0, (New-Object System.Drawing.Size($capW, $capH)))
+            $gfx.Dispose()
 
             # --- optional auf max. Breite verkleinern ---------------------
             if ($maxW -gt 0 -and $capW -gt $maxW) {
                 $newHeight = [int][Math]::Round($capH * ($maxW / $capW))
-                $small = New-Object System.Drawing.Bitmap $maxW, $newHeight
+                $small = [System.Drawing.Bitmap]::new($maxW, $newHeight)
                 $small.SetResolution($dpi, $dpi)
                 $g2 = [System.Drawing.Graphics]::FromImage($small)
                 $g2.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
