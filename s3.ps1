@@ -255,14 +255,33 @@ $frameInterval = [int](1000 / $fps)
 if ($frameInterval -lt 20) { $frameInterval = 20 }
 
 # --- HTTP POST an den Relay (nur ausgehend, http und https) -----------------
-$http = [System.Net.Http.HttpClient]::new()
+Add-Type -AssemblyName System.Net.Http
+$http = New-Object System.Net.Http.HttpClient
 $http.Timeout = [TimeSpan]::FromSeconds(6)
 $jpegType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse('image/jpeg')
 
+function Get-SourceId {
+    try {
+        $envId = $env:SCRENSHARE_ID
+        if ($envId) { return $envId }
+        $cn = $env:COMPUTERNAME
+        $un = $env:USERNAME
+        if ($cn) { return ($cn + '-' + $un) }
+        return $pid.ToString()
+    } catch { return $pid.ToString() }
+}
+
+$srcId = Get-SourceId
+$srcName = $env:COMPUTERNAME
+if (-not $srcName) { $srcName = $srcId }
+
 function Send-To([string]$base, [byte[]]$data) {
-    $content = [System.Net.Http.ByteArrayContent]::new($data)
+    $content = New-Object System.Net.Http.ByteArrayContent -ArgumentList @(,$data)
     $content.Headers.ContentType = $jpegType
-    $resp = $http.PostAsync(($base + '/push'), $content).GetAwaiter().GetResult()
+    $req = New-Object System.Net.Http.HttpRequestMessage -ArgumentList @([System.Net.Http.HttpMethod]::Post, ($base + '/push?id=' + [uri]::EscapeDataString($srcId)))
+    $req.Content = $content
+    $req.Headers.TryAddWithoutValidation('X-Screen-Name', $srcName) | Out-Null
+    $resp = $http.SendAsync($req).GetAwaiter().GetResult()
     return $resp.IsSuccessStatusCode
 }
 
