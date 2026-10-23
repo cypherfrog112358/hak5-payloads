@@ -2,43 +2,36 @@
 ================================================================================
  Screenshare over LAN - V2 (Sender, OHNE Administratorrechte)
 
- Unterschied zu V1 (Screenshare-Over-LAN-fixed.ps1):
-   V1 oeffnet einen HTTP-Server auf dem Ziel -> braucht Admin (Firewall-Regel,
-   URL-Reservierung) und ist aus dem LAN erreichbar.
-   V2 oeffnet KEINEN Port. Es nimmt den Bildschirm auf und schickt jedes Bild
-   per HTTP-POST an einen Empfaenger im selben LAN. Damit funktioniert es auch
-   als normaler Benutzer ohne UAC/Adminrechte (keine Firewall-Regel noetig,
-   nur ausgehender Verkehr).
+ Nimmt den Bildschirm auf und schickt jedes Bild per HTTP an einen Empfaenger
+ im selben LAN. Oeffnet selbst keinen Port, braucht keine Firewall-Regel und
+ laeuft als normaler Benutzer (kein UAC).
 
- Empfaenger: Screenshare-Receiver.py (Python 3, nur Standardbibliothek) auf
- einem beliebigen Rechner im LAN starten, z. B.:
-     python Screenshare-Receiver.py 8090 geheim
- Dann im Browser des Clients:  http://<IP-des-Empfaengers>:8090/?token=geheim
+ Der Empfaenger wird AUTOMATISCH gesucht (UDP-Anmeldung im LAN). Es muss also
+ nichts konfiguriert oder eingetragen werden. Auf dem Empfaenger-Rechner laeuft
+ Screenshare-Receiver.ps1 (reine PowerShell, kein Python).
 
- Konfiguration unten: $serverUrl und $token muessen zum Empfaenger passen.
  Beenden: ESC auf dem Ziel 5 Sekunden gedrueckt halten.
 ================================================================================
 #>
 
 param(
-    [string]$Server = '',    # ueberschreibt $serverUrl (z. B. http://192.168.0.10:8090)
-    [string]$Token  = ''     # ueberschreibt $token
+    [string]$Server = ''     # optional: Empfaenger fest vorgeben (http://IP:8090)
 )
 
-$serverUrl    = 'http://192.168.0.10:8090'   # Empfaenger im LAN (IP:Port)
-$token        = 'geheim'                     # muss zum Empfaenger passen
-$fps          = 2                            # Bilder pro Sekunde (HTTP-POST)
-$jpegQuality  = 60                           # 10-100
-$maxWidth     = 1280                         # 0 = nicht verkleinern
-$captureAll   = 0                            # 0 = primaerer Monitor, 1 = alle
-$hide         = 1                            # 1 = Konsolenfenster ausblenden
-$showInfo     = 1                            # 1 = CMD-Fenster mit Status öffnen
-$exitSeconds  = 5                            # ESC-Dauer zum Beenden
-$logFile      = $null                        # z. B. 'C:\PS\screenshare-v2.log'
-$sendTimeout  = 8                            # Sekunden pro Upload
+$serverUrl     = ''                          # leer = automatisch suchen
+$discoveryPort = 8100                        # UDP-Port der automatischen Erkennung
+$discoveryWait = 15                          # Sekunden pro Suchlauf
+$fps           = 2                           # Bilder pro Sekunde (HTTP-POST)
+$jpegQuality   = 60                          # 10-100
+$maxWidth      = 1280                        # 0 = nicht verkleinern
+$captureAll    = 0                           # 0 = primaerer Monitor, 1 = alle
+$hide          = 1                           # 1 = Konsolenfenster ausblenden
+$showInfo      = 1                           # 1 = CMD-Fenster mit Status oeffnen
+$exitSeconds   = 5                           # ESC-Dauer zum Beenden
+$logFile       = $null                       # z. B. 'C:\Temp\screenshare-v2.log'
+$sendTimeout   = 8                           # Sekunden pro Upload
 
 if ($Server) { $serverUrl = $Server }
-if ($Token)  { $token = $Token }
 
 $selfPath = $MyInvocation.MyCommand.Path
 $isAdmin  = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -60,7 +53,9 @@ function Write-Log([string]$msg) {
     } catch { }
 }
 Write-Log ("Start (V2/Sender). admin=" + $isAdmin + " pid=" + $pid + " pfad=" + $selfPath)
-Write-Log ("Empfaenger: " + $serverUrl + "  fps=" + $fps + "  maxWidth=" + $maxWidth + "  quality=" + $jpegQuality)
+$urlText = $serverUrl
+if (-not $urlText) { $urlText = 'automatisch suchen' }
+Write-Log ("Empfaenger: " + $urlText + "  fps=" + $fps + "  maxWidth=" + $maxWidth + "  quality=" + $jpegQuality)
 
 # --- Vorherige Instanz beenden (gleicher Pfad) ------------------------------
 try {
@@ -159,31 +154,93 @@ if ($screenDpi -lt 72 -or $screenDpi -gt 960) { $screenDpi = 96 }
 Write-Log ("Capture: " + $captureW + "x" + $captureH + " (logisch " + $srcRect.Width + "x" + $srcRect.Height +
            ", scale=" + $scalePct + "% effDpi=" + $effDpi + " screenDpi=" + $screenDpi + " aware=" + $setDpiAware + ")")
 
-# --- Upload-Ziel ------------------------------------------------------------
-if (-not $serverUrl) {
-    Write-Host "FEHLER: `$serverUrl ist leer - Empfaenger im LAN eintragen." -ForegroundColor Red
-    Write-Log "FEHLER: serverUrl leer"
-    exit 1
+# Escape to exit key detection
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class Keyboard2
+{
+    [DllImport("user32.dll")]
+    public static extern short GetAsyncKeyState(int vKey);
 }
-$uploadUrl = $serverUrl.TrimEnd('/') + '/upload?token=' + [System.Uri]::EscapeDataString($token)
+"@
+$VK_ESCAPE = 0x1B
+$startTime = $null
+
+# --- Empfaenger automatisch suchen (UDP-Anmeldung im LAN) -------------------
+$script:udp = $null
+
+function Initialize-Discovery {
+    if ($script:udp) { return }
+    try {
+        $u = New-Object System.Net.Sockets.UdpClient
+        $u.ExclusiveAddressUse = $false
+        $u.Client.SetSocketOption([System.Net.Sockets.SocketOptionLevel]::Socket,
+                                  [System.Net.Sockets.SocketOptionName]::ReuseAddress, $true)
+        $u.Client.Bind((New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, $discoveryPort)))
+        $script:udp = $u
+    } catch {
+        Write-Log ("Discovery-Socket nicht nutzbar: " + $_.Exception.Message)
+        $script:udp = $null
+    }
+}
+
+function Find-Receiver([int]$timeoutSec) {
+    Initialize-Discovery
+    if (-not $script:udp) { return $null }
+    $deadline = (Get-Date).AddSeconds($timeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        try {
+            if ($script:udp.Available -gt 0) {
+                $ep = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, 0)
+                $data = $script:udp.Receive([ref]$ep)
+                $txt = [System.Text.Encoding]::ASCII.GetString($data)
+                if ($txt.StartsWith('SCREENSHARE2|')) {
+                    $parts = $txt.Split('|')
+                    if ($parts.Count -ge 3) {
+                        $url = 'http://' + $parts[1] + ':' + $parts[2]
+                        try {
+                            Invoke-RestMethod -Uri ($url + '/status') -TimeoutSec 3 | Out-Null
+                            Write-Log ("Empfaenger gefunden: " + $url)
+                            return $url
+                        } catch {
+                            Write-Log ("Anmeldung von " + $url + " - HTTP nicht erreichbar (Firewall?)")
+                        }
+                    }
+                }
+            }
+        } catch { }
+        Start-Sleep -Milliseconds 200
+    }
+    return $null
+}
+
 $wc = New-Object System.Net.WebClient
 $wc.Headers.Add('User-Agent', 'ScreenshareSender/2.0')
 $wc.Timeout = $sendTimeout * 1000
 
-# --- Hinweis + Info-Fenster -------------------------------------------------
+$notify = $null
 try {
     $notify = New-Object System.Windows.Forms.NotifyIcon
     $notify.Icon = [System.Drawing.SystemIcons]::Information
-    $notify.BalloonTipTitle = "Screenshare aktiv (Sender V2)"
-    $notify.BalloonTipText = ("Sendet an " + $serverUrl)
     $notify.Visible = $true
-    $notify.ShowBalloonTip(8000)
 } catch { }
 
-if ($showInfo -eq 1) {
+function Show-Balloon([string]$title, [string]$text) {
     try {
-        $infoCmd = 'title Screenshare Sender (V2) & echo. & echo   Sendet an:  ' + $serverUrl +
-                   ' & echo. & echo   Ansehen:  ' + $serverUrl.TrimEnd('/') + '/?token=' + $token +
+        if ($notify) {
+            $notify.BalloonTipTitle = $title
+            $notify.BalloonTipText = $text
+            $notify.ShowBalloonTip(6000)
+        }
+    } catch { }
+}
+
+function Show-InfoWindow([string]$url) {
+    if ($showInfo -ne 1) { return }
+    try {
+        $infoCmd = 'title Screenshare Sender (V2) & echo. & echo   Sendet an:  ' + $url +
+                   ' & echo. & echo   Ansehen im Browser:  ' + $url.TrimEnd('/') + '/' +
                    ' & echo. & echo   Beenden: ESC auf dem Ziel 5 Sekunden halten. & echo.'
         Start-Process -FilePath 'cmd.exe' -ArgumentList '/k', $infoCmd | Out-Null
         Write-Log "Info-Fenster (cmd) geoeffnet"
@@ -191,6 +248,24 @@ if ($showInfo -eq 1) {
         Write-Log ("Info-Fenster fehlgeschlagen: " + $_.Exception.Message)
     }
 }
+
+if (-not $serverUrl) {
+    Write-Log ("Suche Empfaenger im LAN (UDP " + $discoveryPort + ") ...")
+    $serverUrl = Find-Receiver $discoveryWait
+}
+while (-not $serverUrl) {
+    Show-Balloon "Screenshare wartet" "Kein Empfaenger im LAN gefunden, suche weiter ..."
+    if ([Keyboard2]::GetAsyncKeyState($VK_ESCAPE) -lt 0) {
+        if (-not $startTime) { $startTime = Get-Date }
+        if (((Get-Date) - $startTime).TotalSeconds -ge $exitSeconds) { exit }
+    } else { $startTime = $null }
+    $serverUrl = Find-Receiver $discoveryWait
+}
+
+$uploadUrl = $serverUrl.TrimEnd('/') + '/upload'
+Write-Log ("Sende an " + $uploadUrl)
+Show-Balloon "Screenshare aktiv (Sender V2)" ("Sendet an " + $serverUrl)
+Show-InfoWindow $serverUrl
 
 # Code to hide the console on Windows 10 and 11
 if ($hide -eq 1){
@@ -209,18 +284,6 @@ if ($hide -eq 1){
     } catch { }
 }
 
-# Escape to exit key detection
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public class Keyboard2
-{
-    [DllImport("user32.dll")]
-    public static extern short GetAsyncKeyState(int vKey);
-}
-"@
-$VK_ESCAPE = 0x1B
-$startTime = $null
 
 # JPEG-Encoder einmalig vorbereiten
 $jpegCodec = $null
@@ -301,6 +364,17 @@ while ($true) {
         if ($failCount -eq 1 -or ((Get-Date) - $lastFailLog).TotalSeconds -ge 30) {
             Write-Log ("Upload fehlgeschlagen (" + $failCount + "x): " + $_.Exception.Message)
             $lastFailLog = Get-Date
+        }
+        # Empfaenger weg? Nach 10 Fehlversuchen neu suchen (z. B. anderer PC).
+        if ($failCount -ge 10) {
+            $newUrl = Find-Receiver 3
+            if ($newUrl -and $newUrl -ne $serverUrl) {
+                $serverUrl = $newUrl
+                $uploadUrl = $serverUrl.TrimEnd('/') + '/upload'
+                Write-Log ("Umgestiegen auf " + $uploadUrl)
+                Show-Balloon "Screenshare aktiv (Sender V2)" ("Sendet an " + $serverUrl)
+            }
+            if ($newUrl) { $failCount = 0 }
         }
     }
 

