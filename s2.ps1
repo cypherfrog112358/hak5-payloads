@@ -1,37 +1,41 @@
 <#
 ================================================================================
- Screenshare over LAN - V2 (Sender, OHNE Administratorrechte)
+ Screenshare over LAN - V2 (ein Skript, kein Empfaenger noetig)
 
- Nimmt den Bildschirm auf und schickt jedes Bild per HTTP an einen Empfaenger
- im selben LAN. Oeffnet selbst keinen Port, braucht keine Firewall-Regel und
- laeuft als normaler Benutzer (kein UAC).
+ Nimmt den Bildschirm auf und stellt ihn DIREKT per HTTP im LAN bereit.
+ Auf dem Ziel wird nur dieses Skript gestartet - danach im Browser eines
+ beliebigen Geraets im selben LAN aufrufen:
 
- Der Empfaenger wird AUTOMATISCH gesucht (UDP-Anmeldung im LAN). Es muss also
- nichts konfiguriert oder eingetragen werden. Auf dem Empfaenger-Rechner laeuft
- Screenshare-Receiver.ps1 (reine PowerShell, kein Python).
+     http://<IP-des-Ziels>:8080/
+
+ Die IP-Adresse wird automatisch ermittelt und in einem CMD-Fenster sowie als
+ Sprechblase angezeigt. Es wird kein zusaetzliches Programm und keine Datei
+ auf dem anzeigenden Geraet benoetigt.
+
+ Technik: eigener TCP-Server statt HTTP.sys -> keine URL-Reservierung, kein
+ Adminrecht zum Starten noetig. Fuer den Zugriff aus dem LAN muss die Firewall
+ den Port einmal zulassen (mit Adminrechten wird die Regel automatisch
+ angelegt, sonst fragt Windows beim ersten Zugriff).
 
  Beenden: ESC auf dem Ziel 5 Sekunden gedrueckt halten.
+ Optional:  -RemoveAutostart   entfernt den Autostart-Eintrag wieder.
 ================================================================================
 #>
 
 param(
-    [string]$Server = ''     # optional: Empfaenger fest vorgeben (http://IP:8090)
+    [switch]$RemoveAutostart
 )
 
-$serverUrl     = ''                          # leer = automatisch suchen
-$discoveryPort = 8100                        # UDP-Port der automatischen Erkennung
-$discoveryWait = 15                          # Sekunden pro Suchlauf
-$fps           = 2                           # Bilder pro Sekunde (HTTP-POST)
-$jpegQuality   = 60                          # 10-100
-$maxWidth      = 1280                        # 0 = nicht verkleinern
-$captureAll    = 0                           # 0 = primaerer Monitor, 1 = alle
-$hide          = 1                           # 1 = Konsolenfenster ausblenden
-$showInfo      = 1                           # 1 = CMD-Fenster mit Status oeffnen
-$exitSeconds   = 5                           # ESC-Dauer zum Beenden
-$logFile       = $null                       # z. B. 'C:\Temp\screenshare-v2.log'
-$sendTimeout   = 8                           # Sekunden pro Upload
-
-if ($Server) { $serverUrl = $Server }
+$port          = 8080        # HTTP-Port
+$fps           = 20          # Bilder pro Sekunde
+$jpegQuality   = 70          # 10-100
+$maxWidth      = 1600        # 0 = nicht verkleinern
+$captureAll    = 0           # 0 = primaerer Monitor, 1 = alle Monitore
+$hide          = 1           # 1 = Konsolenfenster ausblenden
+$showInfo      = 1           # 1 = CMD-Fenster mit Aufruf-URL oeffnen
+$exitSeconds   = 5           # ESC-Dauer zum Beenden
+$autostart     = 1           # 1 = bei jeder Anmeldung automatisch starten
+$logFile       = $null       # z. B. 'C:\Temp\screenshare-v2.log'
 
 $selfPath = $MyInvocation.MyCommand.Path
 $isAdmin  = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -44,7 +48,6 @@ if (-not $logFile) {
         $logFile = Join-Path $selfDir 'screenshare-v2.log'
     } catch { $logFile = $null }
 }
-
 function Write-Log([string]$msg) {
     try {
         if ($logFile) {
@@ -52,10 +55,18 @@ function Write-Log([string]$msg) {
         }
     } catch { }
 }
-Write-Log ("Start (V2/Sender). admin=" + $isAdmin + " pid=" + $pid + " pfad=" + $selfPath)
-$urlText = $serverUrl
-if (-not $urlText) { $urlText = 'automatisch suchen' }
-Write-Log ("Empfaenger: " + $urlText + "  fps=" + $fps + "  maxWidth=" + $maxWidth + "  quality=" + $jpegQuality)
+
+# --- Autostart --------------------------------------------------------------
+$runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+$runName = 'Screenshare-Over-LAN-V2'
+if ($RemoveAutostart) {
+    try { Remove-ItemProperty -Path $runKey -Name $runName -ErrorAction SilentlyContinue } catch { }
+    Write-Log "Autostart entfernt"
+    Write-Host "Autostart entfernt." -ForegroundColor Green
+    exit
+}
+
+Write-Log ("Start (V2). admin=" + $isAdmin + " pid=" + $pid + " pfad=" + $selfPath)
 
 # --- Vorherige Instanz beenden (gleicher Pfad) ------------------------------
 try {
@@ -97,8 +108,8 @@ Add-Type -AssemblyName System.Drawing
 try {
     [Console]::BackgroundColor = "Black"
     Clear-Host
-    [Console]::SetWindowSize(80, 20)
-    [Console]::Title = "Screenshare Sender (V2)"
+    [Console]::SetWindowSize(88, 24)
+    [Console]::Title = "Screenshare"
 } catch { }
 
 $physW = 0; $physH = 0
@@ -154,118 +165,80 @@ if ($screenDpi -lt 72 -or $screenDpi -gt 960) { $screenDpi = 96 }
 Write-Log ("Capture: " + $captureW + "x" + $captureH + " (logisch " + $srcRect.Width + "x" + $srcRect.Height +
            ", scale=" + $scalePct + "% effDpi=" + $effDpi + " screenDpi=" + $screenDpi + " aware=" + $setDpiAware + ")")
 
-# Escape to exit key detection
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public class Keyboard2
-{
-    [DllImport("user32.dll")]
-    public static extern short GetAsyncKeyState(int vKey);
-}
-"@
-$VK_ESCAPE = 0x1B
-$startTime = $null
-
-# --- Empfaenger automatisch suchen (UDP-Anmeldung im LAN) -------------------
-$script:udp = $null
-
-function Initialize-Discovery {
-    if ($script:udp) { return }
+# --- eigene IP-Adresse (Interface mit Standardroute) ------------------------
+$localIP = $null
+try {
+    $alias = (Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction Stop |
+              Sort-Object -Property RouteMetric | Select-Object -First 1).InterfaceAlias
+    if ($alias) {
+        $localIP = (Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias $alias -ErrorAction SilentlyContinue |
+                    Where-Object { $_.IPAddress -notlike '169.254.*' } | Select-Object -First 1).IPAddress
+    }
+} catch { }
+if (-not $localIP) {
     try {
-        $u = New-Object System.Net.Sockets.UdpClient
-        $u.ExclusiveAddressUse = $false
-        $u.Client.SetSocketOption([System.Net.Sockets.SocketOptionLevel]::Socket,
-                                  [System.Net.Sockets.SocketOptionName]::ReuseAddress, $true)
-        $u.Client.Bind((New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, $discoveryPort)))
-        $script:udp = $u
-    } catch {
-        Write-Log ("Discovery-Socket nicht nutzbar: " + $_.Exception.Message)
-        $script:udp = $null
-    }
+        $localIP = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                    Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } |
+                    Select-Object -First 1).IPAddress
+    } catch { }
+}
+if (-not $localIP) { $localIP = '127.0.0.1' }
+$urlText = 'http://' + $localIP + ':' + $port + '/'
+Write-Log ("IP: " + $localIP + "  URL: " + $urlText)
+
+# --- Firewall: Regel anlegen (nur mit Adminrechten moeglich) ---------------
+if ($isAdmin) {
+    try {
+        Get-NetFirewallRule -DisplayName "Screenshare Over LAN" -ErrorAction SilentlyContinue |
+            Remove-NetFirewallRule -ErrorAction SilentlyContinue
+        New-NetFirewallRule -DisplayName "Screenshare Over LAN" -Direction Inbound -Protocol TCP `
+            -LocalPort $port -Action Allow -ErrorAction SilentlyContinue | Out-Null
+        Write-Log "Firewall-Regel fuer TCP $port angelegt"
+    } catch { Write-Log ("Firewall-Regel fehlgeschlagen: " + $_.Exception.Message) }
 }
 
-function Find-Receiver([int]$timeoutSec) {
-    Initialize-Discovery
-    if (-not $script:udp) { return $null }
-    $deadline = (Get-Date).AddSeconds($timeoutSec)
-    while ((Get-Date) -lt $deadline) {
-        try {
-            if ($script:udp.Available -gt 0) {
-                $ep = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, 0)
-                $data = $script:udp.Receive([ref]$ep)
-                $txt = [System.Text.Encoding]::ASCII.GetString($data)
-                if ($txt.StartsWith('SCREENSHARE2|')) {
-                    $parts = $txt.Split('|')
-                    if ($parts.Count -ge 3) {
-                        $url = 'http://' + $parts[1] + ':' + $parts[2]
-                        try {
-                            Invoke-RestMethod -Uri ($url + '/status') -TimeoutSec 3 | Out-Null
-                            Write-Log ("Empfaenger gefunden: " + $url)
-                            return $url
-                        } catch {
-                            Write-Log ("Anmeldung von " + $url + " - HTTP nicht erreichbar (Firewall?)")
-                        }
-                    }
-                }
-            }
-        } catch { }
-        Start-Sleep -Milliseconds 200
-    }
-    return $null
+# --- Autostart (HKCU, ohne Adminrechte) ------------------------------------
+if ($autostart -eq 1 -and $selfPath) {
+    try {
+        $runCmd = 'powershell -w h -ExecutionPolicy Bypass -File "' + $selfPath + '"'
+        Set-ItemProperty -Path $runKey -Name $runName -Value $runCmd -ErrorAction Stop
+        Write-Log "Autostart eingetragen"
+    } catch { Write-Log ("Autostart fehlgeschlagen: " + $_.Exception.Message) }
 }
 
-$wc = New-Object System.Net.WebClient
-$wc.Headers.Add('User-Agent', 'ScreenshareSender/2.0')
-$wc.Timeout = $sendTimeout * 1000
+# --- TCP-Server (kein HTTP.sys, kein urlacl) -------------------------------
+if ($port -lt 1 -or $port -gt 65535) { $port = 8080 }
+$listener = $null
+try {
+    $listener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Any, $port)
+    $listener.Start()
+} catch {
+    Write-Log ("Port " + $port + " nicht bindbar: " + $_.Exception.Message)
+    Write-Host ("Port " + $port + " ist belegt.") -ForegroundColor Red
+    exit 1
+}
+Write-Log ("Server laeuft auf " + $urlText)
 
+# --- Hinweis + Info-Fenster -------------------------------------------------
 $notify = $null
 try {
     $notify = New-Object System.Windows.Forms.NotifyIcon
     $notify.Icon = [System.Drawing.SystemIcons]::Information
+    $notify.BalloonTipTitle = "Screenshare aktiv"
+    $notify.BalloonTipText = ("Im Browser aufrufen: " + $urlText)
     $notify.Visible = $true
+    $notify.ShowBalloonTip(8000)
 } catch { }
 
-function Show-Balloon([string]$title, [string]$text) {
+if ($showInfo -eq 1) {
     try {
-        if ($notify) {
-            $notify.BalloonTipTitle = $title
-            $notify.BalloonTipText = $text
-            $notify.ShowBalloonTip(6000)
-        }
-    } catch { }
-}
-
-function Show-InfoWindow([string]$url) {
-    if ($showInfo -ne 1) { return }
-    try {
-        $infoCmd = 'title Screenshare Sender (V2) & echo. & echo   Sendet an:  ' + $url +
-                   ' & echo. & echo   Ansehen im Browser:  ' + $url.TrimEnd('/') + '/' +
+        $infoCmd = 'title Screenshare & echo. & echo   Im Browser aufrufen:  ' + $urlText +
+                   ' & echo. & echo   Gleiches LAN noetig. Beim ersten Zugriff Firewall bestaetigen.' +
                    ' & echo. & echo   Beenden: ESC auf dem Ziel 5 Sekunden halten. & echo.'
         Start-Process -FilePath 'cmd.exe' -ArgumentList '/k', $infoCmd | Out-Null
         Write-Log "Info-Fenster (cmd) geoeffnet"
-    } catch {
-        Write-Log ("Info-Fenster fehlgeschlagen: " + $_.Exception.Message)
-    }
+    } catch { Write-Log ("Info-Fenster fehlgeschlagen: " + $_.Exception.Message) }
 }
-
-if (-not $serverUrl) {
-    Write-Log ("Suche Empfaenger im LAN (UDP " + $discoveryPort + ") ...")
-    $serverUrl = Find-Receiver $discoveryWait
-}
-while (-not $serverUrl) {
-    Show-Balloon "Screenshare wartet" "Kein Empfaenger im LAN gefunden, suche weiter ..."
-    if ([Keyboard2]::GetAsyncKeyState($VK_ESCAPE) -lt 0) {
-        if (-not $startTime) { $startTime = Get-Date }
-        if (((Get-Date) - $startTime).TotalSeconds -ge $exitSeconds) { exit }
-    } else { $startTime = $null }
-    $serverUrl = Find-Receiver $discoveryWait
-}
-
-$uploadUrl = $serverUrl.TrimEnd('/') + '/upload'
-Write-Log ("Sende an " + $uploadUrl)
-Show-Balloon "Screenshare aktiv (Sender V2)" ("Sendet an " + $serverUrl)
-Show-InfoWindow $serverUrl
 
 # Code to hide the console on Windows 10 and 11
 if ($hide -eq 1){
@@ -284,6 +257,18 @@ if ($hide -eq 1){
     } catch { }
 }
 
+# Escape to exit key detection
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class Keyboard2
+{
+    [DllImport("user32.dll")]
+    public static extern short GetAsyncKeyState(int vKey);
+}
+"@
+$VK_ESCAPE = 0x1B
+$startTime = $null
 
 # JPEG-Encoder einmalig vorbereiten
 $jpegCodec = $null
@@ -295,14 +280,130 @@ $encParams = New-Object System.Drawing.Imaging.EncoderParameters 1
 $encParams.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter ([System.Drawing.Imaging.Encoder]::Quality), ([long]$jpegQuality)
 
 $frameInterval = [int](1000 / $fps)
-if ($frameInterval -lt 100) { $frameInterval = 100 }
+if ($frameInterval -lt 20) { $frameInterval = 20 }
 
-# --- Aufnahme + Upload ------------------------------------------------------
-$failCount = 0
-$lastFailLog = Get-Date
-$nextFrame = Get-Date
-$framesSent = 0
-Write-Log "Sender-Schleife gestartet"
+# --- HTML-Ansicht -----------------------------------------------------------
+$page = @"
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Screenshare</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<style>
+ html, body { margin: 0; padding: 0; background: #000; width: 100%; height: 100%; overflow: hidden; }
+ img { display: block; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; object-fit: contain; object-position: center center; background: #000; }
+</style>
+</head>
+<body>
+<img src="/stream" alt="Screenshare">
+</body>
+</html>
+"@
+$pageBytes = [System.Text.Encoding]::UTF8.GetBytes($page)
+
+# --- HTTP-Hilfsfunktionen ---------------------------------------------------
+function Read-Request($client) {
+    $stream = $client.GetStream()
+    $buf = New-Object byte[] 16384
+    $ms = New-Object System.IO.MemoryStream
+    $headerEnd = -1
+    $deadline = (Get-Date).AddSeconds(5)
+    $all = $null
+    while ($headerEnd -lt 0 -and (Get-Date) -lt $deadline) {
+        if (-not $stream.DataAvailable) { Start-Sleep -Milliseconds 5; continue }
+        $n = $stream.Read($buf, 0, $buf.Length)
+        if ($n -le 0) { break }
+        $ms.Write($buf, 0, $n)
+        $all = $ms.ToArray()
+        for ($i = 0; $i -le $all.Length - 4; $i++) {
+            if ($all[$i] -eq 13 -and $all[$i+1] -eq 10 -and $all[$i+2] -eq 13 -and $all[$i+3] -eq 10) {
+                $headerEnd = $i + 4
+                break
+            }
+        }
+    }
+    if ($headerEnd -lt 0 -or -not $all) { return $null }
+    $head = [System.Text.Encoding]::ASCII.GetString($all, 0, $headerEnd)
+    $lines = $head -split "`r`n"
+    $pieces = $lines[0].Split(' ')
+    $method = ''
+    $target = ''
+    if ($pieces.Count -ge 2) { $method = $pieces[0]; $target = $pieces[1] }
+    return @{ method = $method; target = $target }
+}
+
+function Send-Response($client, $status, $ctype, [byte[]]$body) {
+    try {
+        $head = "HTTP/1.1 " + $status + "`r`nContent-Type: " + $ctype + "`r`nContent-Length: " + $body.Length +
+                "`r`nCache-Control: no-store`r`nConnection: close`r`n`r`n"
+        $hb = [System.Text.Encoding]::ASCII.GetBytes($head)
+        $s = $client.GetStream()
+        $s.Write($hb, 0, $hb.Length)
+        if ($body.Length -gt 0) { $s.Write($body, 0, $body.Length) }
+        $s.Flush()
+    } catch { }
+    try { $client.Close() } catch { }
+}
+
+# --- Stream-Worker: nimmt auf und schreibt direkt in die Verbindung --------
+$streamWorker = {
+    param($client, $capW, $capH, $dpi, $maxW, $interval, $rect, $codec, $params)
+    $s = $client.GetStream()
+    try {
+        $head = "HTTP/1.1 200 OK`r`nContent-Type: multipart/x-mixed-replace; boundary=frame`r`nCache-Control: no-store`r`nPragma: no-cache`r`nConnection: close`r`n`r`n"
+        $hb = [System.Text.Encoding]::ASCII.GetBytes($head)
+        $s.Write($hb, 0, $hb.Length)
+        $s.Flush()
+
+        $next = Get-Date
+        while ($true) {
+            $bitmap = [System.Drawing.Bitmap]::new($capW, $capH)
+            $bitmap.SetResolution($dpi, $dpi)
+            $gfx = [System.Drawing.Graphics]::FromImage($bitmap)
+            $gfx.CopyFromScreen($rect.X, $rect.Y, 0, 0, (New-Object System.Drawing.Size($capW, $capH)))
+            $gfx.Dispose()
+
+            if ($maxW -gt 0 -and $capW -gt $maxW) {
+                $newHeight = [int][Math]::Round($capH * ($maxW / $capW))
+                $small = [System.Drawing.Bitmap]::new($maxW, $newHeight)
+                $small.SetResolution($dpi, $dpi)
+                $g2 = [System.Drawing.Graphics]::FromImage($small)
+                $g2.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+                $g2.DrawImage($bitmap, 0, 0, $maxW, $newHeight)
+                $g2.Dispose()
+                $bitmap.Dispose()
+                $bitmap = $small
+            }
+
+            $ms = New-Object System.IO.MemoryStream
+            if ($codec) {
+                $bitmap.Save($ms, $codec, $params)
+            } else {
+                $bitmap.Save($ms, [System.Drawing.Imaging.ImageFormat]::Jpeg)
+            }
+            $bitmap.Dispose()
+            $bytes = $ms.ToArray()
+            $ms.Dispose()
+
+            $hdr = [System.Text.Encoding]::ASCII.GetBytes("--frame`r`nContent-Type: image/jpeg`r`nContent-Length: " + $bytes.Length + "`r`n`r`n")
+            $s.Write($hdr, 0, $hdr.Length)
+            $s.Write($bytes, 0, $bytes.Length)
+            $tail = [System.Text.Encoding]::ASCII.GetBytes("`r`n")
+            $s.Write($tail, 0, $tail.Length)
+            $s.Flush()
+
+            $next = $next.AddMilliseconds($interval)
+            $wait = ($next - (Get-Date)).TotalMilliseconds
+            if ($wait -gt 0) { Start-Sleep -Milliseconds ([int]$wait) } else { $next = Get-Date }
+        }
+    } catch { }
+    try { $client.Close() } catch { }
+}
+
+# --- Server-Schleife --------------------------------------------------------
+Write-Log "Server-Schleife gestartet"
+$lastSingle = $null
 
 while ($true) {
     # --- Beenden per ESC (5 s halten) ---------------------------------------
@@ -310,7 +411,8 @@ while ($true) {
         if (-not $startTime) { $startTime = Get-Date }
         if (((Get-Date) - $startTime).TotalSeconds -ge $exitSeconds) {
             try { $notify.Visible = $false; $notify.Dispose() } catch { }
-            Write-Log ("Beendet per ESC. Gesendete Bilder: " + $framesSent)
+            Write-Log "Beendet per ESC"
+            try { $listener.Stop() } catch { }
             (New-Object -ComObject Wscript.Shell).Popup("Screenshare Closed.",3,"Information",0x0)
             Start-Sleep -Seconds 1
             exit
@@ -319,71 +421,80 @@ while ($true) {
         $startTime = $null
     }
 
-    # --- Bildschirm aufnehmen (DPI-korrekt) ---------------------------------
-    try {
-        $bitmap = [System.Drawing.Bitmap]::new($captureW, $captureH)
-        $bitmap.SetResolution($screenDpi, $screenDpi)
-        $gfx = [System.Drawing.Graphics]::FromImage($bitmap)
-        $gfx.CopyFromScreen($srcRect.X, $srcRect.Y, 0, 0, (New-Object System.Drawing.Size($captureW, $captureH)))
-        $gfx.Dispose()
-
-        if ($maxWidth -gt 0 -and $captureW -gt $maxWidth) {
-            $newHeight = [int][Math]::Round($captureH * ($maxWidth / $captureW))
-            $small = [System.Drawing.Bitmap]::new($maxWidth, $newHeight)
-            $small.SetResolution($screenDpi, $screenDpi)
-            $g2 = [System.Drawing.Graphics]::FromImage($small)
-            $g2.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-            $g2.DrawImage($bitmap, 0, 0, $maxWidth, $newHeight)
-            $g2.Dispose()
-            $bitmap.Dispose()
-            $bitmap = $small
-        }
-
-        $ms = New-Object System.IO.MemoryStream
-        if ($jpegCodec) {
-            $bitmap.Save($ms, $jpegCodec, $encParams)
-        } else {
-            $bitmap.Save($ms, [System.Drawing.Imaging.ImageFormat]::Jpeg)
-        }
-        $bitmap.Dispose()
-        $bytes = $ms.ToArray()
-        $ms.Dispose()
-    } catch {
-        Write-Log ("Aufnahme fehlgeschlagen: " + $_.Exception.Message)
-        Start-Sleep -Milliseconds 500
+    if (-not $listener.Pending()) {
+        Start-Sleep -Milliseconds 80
         continue
     }
 
-    # --- Upload -------------------------------------------------------------
+    $client = $null
     try {
-        [void]$wc.UploadData($uploadUrl, 'POST', $bytes)
-        $framesSent++
-        if ($failCount -gt 0) { Write-Log ("Verbindung wieder da (Bild " + $framesSent + ")"); $failCount = 0 }
-    } catch {
-        $failCount++
-        if ($failCount -eq 1 -or ((Get-Date) - $lastFailLog).TotalSeconds -ge 30) {
-            Write-Log ("Upload fehlgeschlagen (" + $failCount + "x): " + $_.Exception.Message)
-            $lastFailLog = Get-Date
-        }
-        # Empfaenger weg? Nach 10 Fehlversuchen neu suchen (z. B. anderer PC).
-        if ($failCount -ge 10) {
-            $newUrl = Find-Receiver 3
-            if ($newUrl -and $newUrl -ne $serverUrl) {
-                $serverUrl = $newUrl
-                $uploadUrl = $serverUrl.TrimEnd('/') + '/upload'
-                Write-Log ("Umgestiegen auf " + $uploadUrl)
-                Show-Balloon "Screenshare aktiv (Sender V2)" ("Sendet an " + $serverUrl)
-            }
-            if ($newUrl) { $failCount = 0 }
-        }
-    }
+        $client = $listener.AcceptTcpClient()
+        $req = Read-Request $client
+        if (-not $req) { try { $client.Close() } catch { }; continue }
 
-    # --- Takt --------------------------------------------------------------
-    $nextFrame = $nextFrame.AddMilliseconds($frameInterval)
-    $wait = ($nextFrame - (Get-Date)).TotalMilliseconds
-    if ($wait -gt 0) {
-        Start-Sleep -Milliseconds ([int]$wait)
-    } else {
-        $nextFrame = Get-Date
+        $path = $req.target
+        if ($path.Contains('?')) { $path = $path.Substring(0, $path.IndexOf('?')) }
+
+        if ($path -eq '/stream') {
+            try {
+                $rs = [runspacefactory]::CreateRunspace()
+                $rs.Open()
+                $ps = [powershell]::Create()
+                $ps.Runspace = $rs
+                [void]$ps.AddScript($streamWorker)
+                [void]$ps.AddArgument($client)
+                [void]$ps.AddArgument($captureW)
+                [void]$ps.AddArgument($captureH)
+                [void]$ps.AddArgument($screenDpi)
+                [void]$ps.AddArgument($maxWidth)
+                [void]$ps.AddArgument($frameInterval)
+                [void]$ps.AddArgument($srcRect)
+                [void]$ps.AddArgument($jpegCodec)
+                [void]$ps.AddArgument($encParams)
+                [void]$ps.BeginInvoke()
+                Write-Log ("Zuschauer verbunden: " + $client.Client.RemoteEndPoint.Address)
+            } catch {
+                Write-Log ("Stream-Worker fehlgeschlagen: " + $_.Exception.Message)
+                try { $client.Close() } catch { }
+            }
+        }
+        elseif ($path -eq '/latest.jpg') {
+            $bits = [System.Drawing.Bitmap]::new($captureW, $captureH)
+            $bits.SetResolution($screenDpi, $screenDpi)
+            $gx = [System.Drawing.Graphics]::FromImage($bits)
+            $gx.CopyFromScreen($srcRect.X, $srcRect.Y, 0, 0, (New-Object System.Drawing.Size($captureW, $captureH)))
+            $gx.Dispose()
+            if ($maxWidth -gt 0 -and $captureW -gt $maxWidth) {
+                $nh = [int][Math]::Round($captureH * ($maxWidth / $captureW))
+                $sm = [System.Drawing.Bitmap]::new($maxWidth, $nh)
+                $sm.SetResolution($screenDpi, $screenDpi)
+                $gx2 = [System.Drawing.Graphics]::FromImage($sm)
+                $gx2.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+                $gx2.DrawImage($bits, 0, 0, $maxWidth, $nh)
+                $gx2.Dispose()
+                $bits.Dispose()
+                $bits = $sm
+            }
+            $ms2 = New-Object System.IO.MemoryStream
+            if ($jpegCodec) { $bits.Save($ms2, $jpegCodec, $encParams) } else { $bits.Save($ms2, [System.Drawing.Imaging.ImageFormat]::Jpeg) }
+            $bits.Dispose()
+            $jpg = $ms2.ToArray()
+            $ms2.Dispose()
+            Send-Response $client '200 OK' 'image/jpeg' $jpg
+        }
+        elseif ($path -eq '/status') {
+            $json = '{"ok":true,"url":"' + $urlText + '","capture":"' + $captureW + 'x' + $captureH + '"}'
+            Send-Response $client '200 OK' 'application/json' ([System.Text.Encoding]::ASCII.GetBytes($json))
+        }
+        elseif ($path -eq '/' -or $path -eq '/index.html') {
+            Send-Response $client '200 OK' 'text/html; charset=utf-8' $pageBytes
+        }
+        else {
+            Send-Response $client '404 Not Found' 'text/plain' ([System.Text.Encoding]::ASCII.GetBytes('not found'))
+        }
+    } catch {
+        Write-Log ("Fehler: " + $_.Exception.Message)
+        try { if ($client) { $client.Close() } } catch { }
+        Start-Sleep -Milliseconds 100
     }
 }
