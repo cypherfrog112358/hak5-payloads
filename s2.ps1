@@ -182,9 +182,9 @@ try {
 
 if ($showInfo -eq 1) {
     try {
-        $infoCmd = 'title Screenshare Sender (V2) & echo. & echo   Sendet an: ' + $serverUrl +
-                   ' & echo. & echo   Ansehen:  http://' + ($serverUrl -replace '^https?://','') -replace '/.*$','' +
-                   ' (Token im Browser noetig) & echo. & echo   Beenden: ESC auf dem Ziel 5 Sekunden halten. & echo.'
+        $infoCmd = 'title Screenshare Sender (V2) & echo. & echo   Sendet an:  ' + $serverUrl +
+                   ' & echo. & echo   Ansehen:  ' + $serverUrl.TrimEnd('/') + '/?token=' + $token +
+                   ' & echo. & echo   Beenden: ESC auf dem Ziel 5 Sekunden halten. & echo.'
         Start-Process -FilePath 'cmd.exe' -ArgumentList '/k', $infoCmd | Out-Null
         Write-Log "Info-Fenster (cmd) geoeffnet"
     } catch {
