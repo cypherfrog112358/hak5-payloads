@@ -3,15 +3,19 @@
  Screenshare over LAN - V3 (Sender an ZimaOS-Relay)
 
  Nimmt den Bildschirm auf und schickt die Bilder an den Relay auf dem
- Homeserver. Der Relay zeigt sie im Browser an - auf jedem Geraet im LAN:
+ Homeserver. Der Relay zeigt sie im Browser an. Das Ziel probiert automatisch
+ alle Wege durch und nimmt den ersten, der klappt:
 
-     http://10.42.42.101:8090/
+     1. LAN          http://10.42.42.101:8090/
+     2. Tailscale    http://100.107.40.45:8090/
+     3. oeffentlich  https://zimaos.tail71504b.ts.net/   (Tailscale Funnel)
 
- Das Ziel oeffnet KEINEN Port: es verbindet sich nur nach aussen (HTTP POST).
- Damit gibt es keine Firewall-Frage und es sind keine Adminrechte noetig.
+ Damit funktioniert dieselbe Payload in jedem Netzwerk. Das Ziel oeffnet
+ KEINEN Port: es verbindet sich nur nach aussen (HTTP/HTTPS POST). Keine
+ Firewall-Frage, keine Adminrechte.
 
  Relay auf dem Server:  python3 /DATA/AppData/screenshare/relay.py
- Anzeige/Status:        http://10.42.42.101:8090/   und  .../status
+ Anzeige/Status:        <Adresse>/   und  <Adresse>/status
 
  Beenden: ESC auf dem Ziel 5 Sekunden gedrueckt halten.
  Optional:  -RemoveAutostart   entfernt den Autostart-Eintrag wieder.
@@ -20,9 +24,19 @@
 
 param(
     [switch]$RemoveAutostart,
-    [string]$RelayHost = '10.42.42.101',
-    [int]$RelayPort = 8090
+    [string]$Relay = ''          # feste Adresse erzwingen, z. B. -Relay http://1.2.3.4:8090
 )
+
+# Relay-Ziele in dieser Reihenfolge: eigenes LAN -> Tailscale -> oeffentlich (Funnel)
+if ($Relay) {
+    $targets = @($Relay.TrimEnd('/'))
+} else {
+    $targets = @(
+        'http://10.42.42.101:8090',
+        'http://100.107.40.45:8090',
+        'https://zimaos.tail71504b.ts.net'
+    )
+}
 
 $fps           = 15          # Bilder pro Sekunde (Zielwert)
 $jpegQuality   = 65          # 10-100
@@ -61,7 +75,7 @@ if ($RemoveAutostart) {
     exit
 }
 
-Write-Log ("Start (V3). pid=" + $pid + " pfad=" + $selfPath + " relay=" + $RelayHost + ":" + $RelayPort)
+Write-Log ("Start (V3). pid=" + $pid + " pfad=" + $selfPath + " ziele=" + ($targets -join ", "))
 
 # --- Vorherige Instanz beenden (gleicher Pfad) ------------------------------
 try {
@@ -160,8 +174,8 @@ if ($screenDpi -lt 72 -or $screenDpi -gt 960) { $screenDpi = 96 }
 Write-Log ("Capture: " + $captureW + "x" + $captureH + " (logisch " + $srcRect.Width + "x" + $srcRect.Height +
            ", scale=" + $scalePct + "% effDpi=" + $effDpi + " screenDpi=" + $screenDpi + " aware=" + $setDpiAware + ")")
 
-$urlText = 'http://' + $RelayHost + ':' + $RelayPort + '/'
-Write-Log ("Anzeige: " + $urlText)
+$urlText = $targets[0] + '/'
+Write-Log ("Anzeige (erster Versuch): " + $urlText)
 
 # --- Autostart (HKCU, ohne Adminrechte) ------------------------------------
 if ($autostart -eq 1 -and $selfPath) {
@@ -173,20 +187,25 @@ if ($autostart -eq 1 -and $selfPath) {
 }
 
 # --- Hinweis (ohne Fenster) -------------------------------------------------
-$notify = $null
-try { Set-Clipboard -Value $urlText -ErrorAction SilentlyContinue } catch { }
-try {
-    $notify = New-Object System.Windows.Forms.NotifyIcon
-    $notify.Icon = [System.Drawing.SystemIcons]::Information
-    $notify.BalloonTipTitle = "Screenshare aktiv"
-    $notify.BalloonTipText = ("Ansehen: " + $urlText)
-    $notify.Visible = $true
-    $notify.ShowBalloonTip(10000)
-} catch { }
+$script:notify = $null
+$script:notified = $false
+function Show-Url([string]$url) {
+    try { Set-Clipboard -Value $url -ErrorAction SilentlyContinue } catch { }
+    if ($script:notified) { return }
+    try {
+        $script:notify = New-Object System.Windows.Forms.NotifyIcon
+        $script:notify.Icon = [System.Drawing.SystemIcons]::Information
+        $script:notify.BalloonTipTitle = "Screenshare aktiv"
+        $script:notify.BalloonTipText = ("Ansehen: " + $url)
+        $script:notify.Visible = $true
+        $script:notify.ShowBalloonTip(10000)
+    } catch { }
+    $script:notified = $true
+}
 
 if ($showInfo -eq 1) {
     try {
-        $infoCmd = 'title Screenshare & echo. & echo   Ansehen auf jedem Geraet im LAN:  ' + $urlText +
+        $infoCmd = 'title Screenshare & echo. & echo   Ansehen:  ' + $urlText + '   (' + ($targets -join ' / ') + ')' +
                    ' & echo. & echo   Beenden: ESC auf dem Ziel 5 Sekunden halten. & echo.'
         Start-Process -FilePath 'cmd.exe' -ArgumentList '/k', $infoCmd | Out-Null
         Write-Log "Info-Fenster (cmd) geoeffnet"
@@ -235,24 +254,16 @@ $encParams.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter ([Syste
 $frameInterval = [int](1000 / $fps)
 if ($frameInterval -lt 20) { $frameInterval = 20 }
 
-# --- HTTP POST an den Relay (nur ausgehend) --------------------------------
-function Send-Frame([byte[]]$data) {
-    $c = New-Object System.Net.Sockets.TcpClient
-    try {
-        $ar = $c.BeginConnect($RelayHost, $RelayPort, $null, $null)
-        if (-not $ar.AsyncWaitHandle.WaitOne(3000)) { throw 'connect timeout' }
-        $c.EndConnect($ar)
-        $c.NoDelay = $true
-        $s = $c.GetStream()
-        $head = "POST /push HTTP/1.1`r`nHost: " + $RelayHost + ":" + $RelayPort + "`r`nContent-Type: image/jpeg`r`nContent-Length: " +
-                $data.Length + "`r`nConnection: close`r`n`r`n"
-        $hb = [System.Text.Encoding]::ASCII.GetBytes($head)
-        $s.Write($hb, 0, $hb.Length)
-        $s.Write($data, 0, $data.Length)
-        $s.Flush()
-    } finally {
-        try { $c.Close() } catch { }
-    }
+# --- HTTP POST an den Relay (nur ausgehend, http und https) -----------------
+$http = [System.Net.Http.HttpClient]::new()
+$http.Timeout = [TimeSpan]::FromSeconds(6)
+$jpegType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse('image/jpeg')
+
+function Send-To([string]$base, [byte[]]$data) {
+    $content = [System.Net.Http.ByteArrayContent]::new($data)
+    $content.Headers.ContentType = $jpegType
+    $resp = $http.PostAsync(($base + '/push'), $content).GetAwaiter().GetResult()
+    return $resp.IsSuccessStatusCode
 }
 
 # --- Sende-Schleife ---------------------------------------------------------
@@ -277,6 +288,8 @@ if ($maxWidth -gt 0 -and $captureW -gt $maxWidth) {
 }
 $msBuf = New-Object System.IO.MemoryStream
 $online = $false
+$active = $null
+$retryAt = [DateTime]::MinValue
 $next = Get-Date
 
 while ($true) {
@@ -284,7 +297,7 @@ while ($true) {
     if ([Keyboard3]::GetAsyncKeyState($VK_ESCAPE) -lt 0) {
         if (-not $startTime) { $startTime = Get-Date }
         if (((Get-Date) - $startTime).TotalSeconds -ge $exitSeconds) {
-            try { $notify.Visible = $false; $notify.Dispose() } catch { }
+            try { $script:notify.Visible = $false; $script:notify.Dispose() } catch { }
             Write-Log "Beendet per ESC"
             if ($hide -ne 1) { try { (New-Object -ComObject Wscript.Shell).Popup("Screenshare Closed.",3,"Information",0x0) } catch { } }
             Start-Sleep -Seconds 1
@@ -306,11 +319,38 @@ while ($true) {
         }
         $bytes = $msBuf.ToArray()
 
-        Send-Frame $bytes
-        if (-not $online) { Write-Log ("Relay erreichbar (" + $bytes.Length + " B/Frame)"); $online = $true }
+        if (-not $active -or (Get-Date) -ge $retryAt) {
+            # Ziel suchen: LAN -> Tailscale -> oeffentlich
+            $active = $null
+            foreach ($t in $targets) {
+                try {
+                    if (Send-To $t $bytes) { $active = $t; break }
+                } catch { }
+            }
+            if ($active) {
+                if (-not $online) { Write-Log ("Relay aktiv: " + $active + "  (" + $bytes.Length + " B/Frame)"); $online = $true }
+                if ($urlText -ne ($active + '/')) {
+                    $urlText = $active + '/'
+                    Write-Log ("Anzeige: " + $urlText)
+                }
+                Show-Url $urlText
+            } else {
+                if ($online) { Write-Log "Kein Relay erreichbar"; $online = $false }
+                $retryAt = (Get-Date).AddSeconds(3)
+            }
+        } else {
+            try {
+                if (-not (Send-To $active $bytes)) { throw 'Statuscode' }
+            } catch {
+                Write-Log ("Relay " + $active + " nicht mehr erreichbar: " + $_.Exception.Message)
+                $active = $null
+                $online = $false
+            }
+        }
     } catch {
-        if ($online) { Write-Log ("Relay nicht erreichbar: " + $_.Exception.Message); $online = $false }
-        Start-Sleep -Milliseconds 500
+        if ($online) { Write-Log ("Fehler: " + $_.Exception.Message); $online = $false }
+        $active = $null
+        Start-Sleep -Milliseconds 300
     }
 
     $next = $next.AddMilliseconds($frameInterval)
