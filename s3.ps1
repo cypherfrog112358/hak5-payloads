@@ -38,9 +38,9 @@ if ($Relay) {
     )
 }
 
-$fps           = 15          # Bilder pro Sekunde (Zielwert)
-$jpegQuality   = 65          # 10-100
-$maxWidth      = 1280        # 0 = nicht verkleinern
+$fps           = 12          # Bilder pro Sekunde (Zielwert)
+$jpegQuality   = 58          # 10-100
+$maxWidth      = 1024        # 0 = nicht verkleinern
 $captureAll    = 0           # 0 = primaerer Monitor, 1 = alle Monitore
 $hide          = 1           # 1 = Konsolenfenster ausblenden
 $showInfo      = 0           # 1 = CMD-Fenster mit Aufruf-URL oeffnen
@@ -281,7 +281,7 @@ function Send-To([string]$base, [byte[]]$data) {
     $req = New-Object System.Net.Http.HttpRequestMessage -ArgumentList @([System.Net.Http.HttpMethod]::Post, ($base + '/push?id=' + [uri]::EscapeDataString($srcId)))
     $req.Content = $content
     $req.Headers.TryAddWithoutValidation('X-Screen-Name', $srcName) | Out-Null
-    $resp = $http.SendAsync($req).GetAwaiter().GetResult()
+    $resp = $http.SendAsync($req, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult(); try { $resp.Content.Dispose() } catch { }; $resp.Dispose()
     return $resp.IsSuccessStatusCode
 }
 
