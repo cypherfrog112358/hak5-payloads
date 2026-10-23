@@ -8,9 +8,9 @@
 
      http://<IP-des-Ziels>:8080/
 
- Die IP-Adresse wird automatisch ermittelt und in einem CMD-Fenster sowie als
- Sprechblase angezeigt. Es wird kein zusaetzliches Programm und keine Datei
- auf dem anzeigenden Geraet benoetigt.
+ Die IP-Adresse wird automatisch ermittelt und - ohne sichtbares Fenster - als
+ Sprechblase, per Zwischenablage und in der Logdatei angezeigt. Es wird kein
+ zusaetzliches Programm und keine Datei auf dem anzeigenden Geraet benoetigt.
 
  Technik: eigener TCP-Server statt HTTP.sys -> keine URL-Reservierung, kein
  Adminrecht zum Starten noetig. Fuer den Zugriff aus dem LAN muss die Firewall
@@ -32,7 +32,7 @@ $jpegQuality   = 70          # 10-100
 $maxWidth      = 1600        # 0 = nicht verkleinern
 $captureAll    = 0           # 0 = primaerer Monitor, 1 = alle Monitore
 $hide          = 1           # 1 = Konsolenfenster ausblenden
-$showInfo      = 1           # 1 = CMD-Fenster mit Aufruf-URL oeffnen
+$showInfo      = 0           # 1 = CMD-Fenster mit Aufruf-URL oeffnen (0 = unsichtbar)
 $exitSeconds   = 5           # ESC-Dauer zum Beenden
 $autostart     = 1           # 1 = bei jeder Anmeldung automatisch starten
 $logFile       = $null       # z. B. 'C:\Temp\screenshare-v2.log'
@@ -219,15 +219,18 @@ try {
 }
 Write-Log ("Server laeuft auf " + $urlText)
 
-# --- Hinweis + Info-Fenster -------------------------------------------------
+# --- Hinweis (ohne Fenster) -------------------------------------------------
 $notify = $null
+try {
+    Set-Clipboard -Value $urlText -ErrorAction SilentlyContinue
+} catch { }
 try {
     $notify = New-Object System.Windows.Forms.NotifyIcon
     $notify.Icon = [System.Drawing.SystemIcons]::Information
     $notify.BalloonTipTitle = "Screenshare aktiv"
-    $notify.BalloonTipText = ("Im Browser aufrufen: " + $urlText)
+    $notify.BalloonTipText = ("Im Browser aufrufen: " + $urlText + "   (Adresse liegt in der Zwischenablage)")
     $notify.Visible = $true
-    $notify.ShowBalloonTip(8000)
+    $notify.ShowBalloonTip(10000)
 } catch { }
 
 if ($showInfo -eq 1) {
@@ -413,7 +416,7 @@ while ($true) {
             try { $notify.Visible = $false; $notify.Dispose() } catch { }
             Write-Log "Beendet per ESC"
             try { $listener.Stop() } catch { }
-            (New-Object -ComObject Wscript.Shell).Popup("Screenshare Closed.",3,"Information",0x0)
+            if ($hide -ne 1) { try { (New-Object -ComObject Wscript.Shell).Popup("Screenshare Closed.",3,"Information",0x0) } catch { } }
             Start-Sleep -Seconds 1
             exit
         }

