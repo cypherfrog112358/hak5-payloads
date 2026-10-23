@@ -1,0 +1,12 @@
+name: screenshare
+services:
+  relay:
+    image: python:3-alpine
+    container_name: screenshare
+    restart: unless-stopped
+    ports:
+      - "8090:8090"
+    working_dir: /app
+    command: python relay.py
+    volumes:
+      - /DATA/AppData/screenshare:/app
